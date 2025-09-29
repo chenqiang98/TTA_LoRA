@@ -1,0 +1,17 @@
+{
+  "brightness": 0,
+  "contrast": 1,
+  "defocus_blur": 2,
+  "elastic_transform": 3,
+  "fog": 4,
+  "frost": 5,
+  "gaussian_noise": 6,
+  "glass_blur": 7,
+  "impulse_noise": 8,
+  "jpeg_compression": 9,
+  "motion_blur": 10,
+  "pixelate": 11,
+  "shot_noise": 12,
+  "snow": 13,
+  "zoom_blur": 14
+}
