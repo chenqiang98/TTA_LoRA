@@ -278,7 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_folder", type=str, default="./data/mini-ImageNet-C", help="Path to the Mini-ImageNet-C dataset folder.")
     parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3-1B", help="Hugging Face model identifier.")
     parser.add_argument("--num_samples", type=int, default=5000, help="Number of images to evaluate.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for the DataLoader.")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
 

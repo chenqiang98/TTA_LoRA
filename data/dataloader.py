@@ -126,19 +126,25 @@ class TTALoRADataset(torch.utils.data.Dataset):
                         except Exception as e:
                             print(f"警告: 处理tar文件 {tar_file} 时出错: {e}")
                 else:
-                    # 处理普通文件夹格式
-                    for image_file in os.listdir(severity_path):
-                        if not image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    # 处理普通文件夹格式，其结构为 severity/class/image.jpg
+                    # 首先，为了提高效率，创建一个从WordNet ID到类别索引的逆向映射
+                    wordnet_to_index = {v[0]: int(k) for k, v in class_index_data.items()}
+
+                    for class_dir in os.listdir(severity_path):
+                        class_path = severity_path / class_dir
+                        if not os.path.isdir(class_path):
                             continue
                         
-                        image_path = severity_path / image_file
-                        
-                        # 从文件名中提取类别索引
-                        class_index = self._extract_class_index_from_filename(image_file, class_index_data)
+                        # 目录名即为类别ID (例如 'n01440764')
+                        class_id = class_dir
+                        class_index = wordnet_to_index.get(class_id)
                         
                         if class_index is not None:
-                            image_paths.append(str(image_path))
-                            labels.append([corruption_type, class_index])
+                            for image_file in os.listdir(class_path):
+                                if image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                                    image_path = class_path / image_file
+                                    image_paths.append(str(image_path))
+                                    labels.append([corruption_type, class_index])
 
             print(f"从{corruption_path}加载了 {len([p for p in image_paths if (isinstance(p, tuple) and str(corruption_path) in p[0]) or (isinstance(p, str) and str(corruption_path) in p)])} 张图片")
         
