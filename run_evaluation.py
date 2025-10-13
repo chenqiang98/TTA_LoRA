@@ -208,13 +208,22 @@ def main(args):
     """Main function to run the evaluation."""
     set_seed(args.seed)
 
+    if args.quick_validate:
+        print("\n--- Running in Quick Validation Mode ---")
+        args.num_samples = 32
+        args.batch_size = 8
+        print(f"Number of samples set to {args.num_samples}")
+        print(f"Batch size set to {args.batch_size}")
+        print("----------------------------------------\n")
+
     # Setup dataset and dataloader
     mllm_transform = build_transform(224)
     dataset = TTALoRADataset(
         dataset_folder=args.dataset_folder,
         download_dataset=False,
         target_model='MLLM',
-        transform=mllm_transform
+        transform=mllm_transform,
+        quick_validate=args.quick_validate
     )
     dataloader = DataLoader(
         dataset,
@@ -281,6 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
+    parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
 
     args = parser.parse_args()
     main(args)
