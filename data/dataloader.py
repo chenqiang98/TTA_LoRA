@@ -7,12 +7,85 @@ from PIL import Image
 import tarfile
 import io
 from tqdm import tqdm
+import webdataset as wds
+from torch.utils.data import IterableDataset
 
 image_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+def worker_init_fn(worker_id):
+    """
+    Sets the seed for each worker in a DataLoader.
+    """
+    seed = 42 + worker_id
+    random.seed(seed)
+
+
+class WebTTALoRADataset(IterableDataset):
+    """
+    A dataset class for loading TTALoRA data from a webdataset.
+    This is an IterableDataset, suitable for streaming data.
+    """
+    def __init__(self, url, metadata_path, transform=None, quick_validate=False):
+        """
+        Args:
+            url (string): URL or path to the webdataset .tar file(s).
+            metadata_path (string): Path to the directory containing class_index.json and corruption_index.json.
+            transform (callable, optional): Optional transform to be applied on a sample.
+        """
+        super().__init__()
+        self.url = url
+        self.transform = transform
+        self.quick_validate = quick_validate
+
+        # Load metadata
+        self.class_index_path = os.path.join(metadata_path, 'class_index.json')
+        self.corruption_index_path = os.path.join(metadata_path, 'corruption_index.json')
+        
+        with open(self.class_index_path, 'r') as f:
+            self.class_index = json.load(f)
+        with open(self.corruption_index_path, 'r') as f:
+            self.corruption_index = json.load(f)
+        
+        # Create a reverse mapping from class name (e.g., n01440764) to class index (e.g., 0)
+        self.class_name_to_idx = {details[0]: int(idx) for idx, details in self.class_index.items()}
+
+    def __iter__(self):
+        # Create the dataset pipeline
+        # If the URL is from Hugging Face, prepend with 'hf://'
+        if "hf.co" in self.url or self.url.count("/") == 1:
+             dataset_url = f"pipe:curl -L hf://datasets/{self.url}/resolve/main/{os.path.basename(self.url).replace('.tar','')}.tar"
+        else:
+             dataset_url = self.url
+        
+        dataset = wds.WebDataset(dataset_url).decode("pil")
+
+        for sample in dataset:
+            # Extract key and image
+            key = sample['__key__']
+            image = sample['png'] if 'png' in sample else sample['jpg']
+
+            # Parse the key to get labels
+            try:
+                corruption_name, severity_str, class_name, _ = key.split('/')
+                severity = int(severity_str)
+                
+                corruption_label = self.corruption_index[corruption_name]
+                class_label = self.class_name_to_idx[class_name]
+
+                if self.transform:
+                    image = self.transform(image)
+                
+                yield image, (corruption_label, class_label, severity)
+
+            except (ValueError, KeyError) as e:
+                # This can happen if the key format is unexpected.
+                # print(f"Skipping sample with malformed key '{key}': {e}")
+                continue
+
 
 class TTALoRADataset(torch.utils.data.Dataset):
     """

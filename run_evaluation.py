@@ -11,8 +11,9 @@ from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
+import os
 
-from data.dataloader import TTALoRADataset
+from data.dataloader import TTALoRADataset, build_transform, worker_init_fn, WebTTALoRADataset
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -153,17 +154,34 @@ def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
 
 def collect_data(dataloader, num_samples):
     """Collects a specified number of samples from the dataloader."""
-    all_images = []
-    all_labels = []
-    total_images = 0
-    for images, labels in tqdm(dataloader, desc="Collecting image data"):
-        all_images.append(images)
-        all_labels.append(labels)
-        total_images += images.shape[0]
-        if total_images >= num_samples:
+    images, labels = [], ([], [], [])
+    
+    pbar = tqdm(total=num_samples if num_samples is not None else 'Unknown', desc="Collecting data")
+    
+    collected_count = 0
+    for images_batch, labels_batch in dataloader:
+        if num_samples is not None and collected_count >= num_samples:
             break
 
-    if not all_images:
+        num_to_take = len(images_batch)
+        if num_samples is not None:
+            remaining = num_samples - collected_count
+            if num_to_take > remaining:
+                num_to_take = remaining
+                images_batch = images_batch[:num_to_take]
+                labels_batch = [l[:num_to_take] for l in labels_batch]
+
+        images.append(images_batch)
+        for i in range(len(labels)):
+            labels[i].append(labels_batch[i])
+        
+        collected_count += num_to_take
+        pbar.update(num_to_take)
+
+    pbar.close()
+
+    if not images:
+        print("No data collected from the dataloader.")
         return None, None
 
     combined_images = torch.cat(all_images, dim=0)[:num_samples]
@@ -222,38 +240,43 @@ def main(args):
 
     # Setup dataset and dataloader
     mllm_transform = build_transform(224)
-    dataset = TTALoRADataset(
-        dataset_folder=args.dataset_folder,
-        download_dataset=False,
-        target_model='MLLM',
-        transform=mllm_transform,
-        quick_validate=args.quick_validate
-    )
+
+    if os.path.isdir(args.dataset_path):
+        print(f"Loading dataset from folder: {args.dataset_path}")
+        dataset = TTALoRADataset(
+            dataset_folder=args.dataset_path,
+            download_dataset=False,
+            target_model='MLLM',
+            transform=mllm_transform,
+            quick_validate=args.quick_validate
+        )
+        metadata_source_path = args.dataset_path # Assume metadata is in the folder
+    else:
+        print(f"Loading dataset from webdataset source: {args.dataset_path}")
+        dataset = WebTTALoRADataset(
+            url=args.dataset_path,
+            metadata_path=args.metadata_path,
+            transform=mllm_transform,
+            quick_validate=args.quick_validate
+        )
+        metadata_source_path = args.metadata_path # Use the specified metadata path
+        
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=not isinstance(dataset, WebTTALoRADataset), # Disable shuffle for IterableDataset
         worker_init_fn=worker_init_fn
     )
 
-    # Load Model and Tokenizer
-    print(f"Loading model: {args.model_name}")
-    model = AutoModel.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True
-    ).eval().cuda()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True, use_fast=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
     # Load class and corruption indices
-    with open(dataset.class_index, 'r') as f:
+    class_index_path = os.path.join(metadata_source_path, 'class_index.json')
+    corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+
+    with open(class_index_path, 'r') as f:
         class_index = json.load(f)
     class_names = [details[1] for details in class_index.values()]
 
-    with open(dataset.corruption_index, 'r') as f:
+    with open(corruption_index_path, 'r') as f:
         corruption_index = json.load(f)
     corruption_names = list(corruption_index.keys())
 
@@ -288,19 +311,54 @@ def main(args):
 
 if __name__ == "__main__":
     """
-    Example:
-    python run_evaluation.py 
-    Model: 
-    1. OpenGVLab/InternVL3_1B
-    2. OpenGVLab/InternVL3_5-1B
-    3. OpenGVLab/InternVL3_5-2B
-    4. HuggingFaceTB/SmolVLM-256M-Instruct
-    5. HuggingFaceTB/SmolVLM-500M-Instruct
+    Example Usage:
+    ------------------------------------------------------------------------------------
+    All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency.
+    
+    1. Evaluate on the local 'nano-imagenet-c' folder dataset:
+       python run_evaluation.py --dataset_path ./data/nano-imagenet-c
+    
+    2. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
+       python run_evaluation.py \\
+           --dataset_path niuniandaji/nano-imagenet-c \\
+           --metadata_path ./data 
+    
+    3. Evaluate on a local .tar webdataset file, limiting to 100 samples for a quick test:
+       python run_evaluation.py \\
+           --dataset_path ./data/nano-ImageNet-C.tar \\
+           --metadata_path ./data \\
+           --num_samples 100
+
+    4. Run in quick validation mode (uses a small, fixed number of samples and smaller batch size):
+       python run_evaluation.py --quick_validate
+    
+    5. Evaluate only the 'corruption' detection task on the nano dataset folder:
+       python run_evaluation.py \\
+           --dataset_path ./data/nano-imagenet-c \\
+           --task corruption
+    ------------------------------------------------------------------------------------
+    
+    Notes on available models and datasets:
+    
+    - **Models**: This script is compatible with various Vision-Language Models from Hugging Face.
+      Some tested models include:
+      - OpenGVLab/InternVL3_1B
+      - OpenGVLab/InternVL3_5-1B
+      - OpenGVLab/InternVL3_5-2B
+      - HuggingFaceTB/SmolVLM-256M-Instruct
+      - HuggingFaceTB/SmolVLM-500M-Instruct
+
+    - **Datasets**: The --dataset_path argument supports three formats:
+      1. Path to a local folder (e.g., ./data/mini-ImageNet-C)
+      2. Path to a local .tar webdataset file (e.g., ./data/nano-ImageNet-C.tar)
+      3. A Hugging Face Hub dataset ID (e.g., niuniandaji/nano-imagenet-c)
     """
+    
     parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models on ImageNet-C")
-    parser.add_argument("--dataset_folder", type=str, default="./data/mini-ImageNet-C", help="Path to the Mini-ImageNet-C dataset folder.")
-    parser.add_argument("--model_name", type=str, default="", help="Hugging Face model identifier.")
-    parser.add_argument("--num_samples", type=int, default=5000, help="Number of images to evaluate.")
+    parser.add_argument("--dataset_path", type=str, default="./data/nano-imagenet-c", help="Path to the dataset (folder, .tar file, or HF repo ID).")
+    parser.add_argument("--metadata_path", type=str, default="./data", help="Path to the directory containing class_index.json and corruption_index.json.")
+    parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3_5-1B", help="Hugging Face model identifier.")
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of images to evaluate. If not provided, evaluates the entire dataset.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
