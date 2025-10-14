@@ -317,7 +317,7 @@ def main(args):
     print(f"Loading model and tokenizer from: {args.model_name}")
     model = AutoModel.from_pretrained(
         args.model_name,
-        torch_dtype=dtype,
+        dtype=dtype,
         low_cpu_mem_usage=True,
         trust_remote_code=True
     ).to(device).eval()
@@ -499,7 +499,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3-1B", help="Hugging Face model identifier.")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of images to evaluate. If not provided, evaluates the entire dataset.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for the DataLoader.")
-    parser.add_argument("--num_workers", type=int, default=8, help="Number of workers for data loading.")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
