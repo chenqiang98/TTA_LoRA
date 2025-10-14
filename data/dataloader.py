@@ -285,22 +285,21 @@ class TTALoRADataset(torch.utils.data.Dataset):
                 tar_path, member_name = image_path
                 image = self._load_image_from_tar(tar_path, member_name)
                 if image is None:
-                    raise ValueError(f"无法从tar文件加载图像: {tar_path}#{member_name}")
+                    # Error is printed in the helper function, return None to skip.
+                    return None, None
             else:
                 # 普通文件路径
                 image = Image.open(image_path).convert('RGB')
             
-            # 应用变换
+            # Apply transforms if they are provided
             image, label = self._apply_transforms((image, label))
             
             return image, label
             
         except Exception as e:
-            print(f"加载图像时出错: {image_path}, 错误: {e}")
-            # 返回一个默认的空白图像和标签，避免中断训练
-            default_image = Image.new('RGB', (224, 224), color=(0, 0, 0))
-            default_image, label = self._apply_transforms((default_image, label))
-            return default_image, label
+            # This will catch errors from Image.open() for corrupted files
+            print(f"Warning: Could not load image {image_path}: {e}. Skipping.")
+            return None, None
 
     def __iter__(self):
         """
