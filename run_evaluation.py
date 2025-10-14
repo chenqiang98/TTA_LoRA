@@ -275,6 +275,10 @@ def main(args):
 
     # Setup dataset and dataloader
     mllm_transform = build_transform(224)
+    
+    # Metadata files are expected to be in a fixed location within the repo
+    metadata_source_path = "./data"
+    print(f"Loading metadata from default path: {metadata_source_path}")
 
     if os.path.isdir(args.dataset_path):
         print(f"Loading dataset from folder: {args.dataset_path}")
@@ -285,16 +289,14 @@ def main(args):
             transform=mllm_transform,
             quick_validate=args.quick_validate
         )
-        metadata_source_path = args.dataset_path # Assume metadata is in the folder
     else:
         print(f"Loading dataset from webdataset source: {args.dataset_path}")
         dataset = WebTTALoRADataset(
             url=args.dataset_path,
-            metadata_path=args.metadata_path,
+            metadata_path=metadata_source_path,
             transform=mllm_transform,
             quick_validate=args.quick_validate
         )
-        metadata_source_path = args.metadata_path # Use the specified metadata path
         
     dataloader = DataLoader(
         dataset,
@@ -371,28 +373,28 @@ if __name__ == "__main__":
     """
     Example Usage:
     ------------------------------------------------------------------------------------
-    All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency.
+    All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency, unless specified otherwise.
     
     1. Evaluate on the local 'nano-imagenet-c' folder dataset:
+       python run_evaluation.py --dataset_path ./data/nano-imagenet-c
+    
+    2. Evaluate with a different model (e.g., SmolVLM) on the nano dataset:
        python run_evaluation.py \
            --dataset_path ./data/nano-imagenet-c \
-           --model_name OpenGVLab/InternVL3_5-1B
+           --model_name HuggingFaceTB/SmolVLM-500M-Instruct
+
+    3. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
+       python run_evaluation.py --dataset_path niuniandaji/nano-imagenet-c
     
-    2. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
-       python run_evaluation.py \
-           --dataset_path niuniandaji/nano-imagenet-c \
-           --metadata_path ./data 
-    
-    3. Evaluate on a local .tar webdataset file, limiting to 100 samples for a quick test:
+    4. Evaluate on a local .tar webdataset file, limiting to 100 samples for a quick test:
        python run_evaluation.py \
            --dataset_path ./data/nano-ImageNet-C.tar \
-           --metadata_path ./data \
            --num_samples 100
 
-    4. Run in quick validation mode (uses a small, fixed number of samples and smaller batch size):
+    5. Run in quick validation mode (uses a small, fixed number of samples and smaller batch size):
        python run_evaluation.py --quick_validate
     
-    5. Evaluate only the 'corruption' detection task on the nano dataset folder:
+    6. Evaluate only the 'corruption' detection task on the nano dataset folder:
        python run_evaluation.py \
            --dataset_path ./data/nano-imagenet-c \
            --task corruption
@@ -416,7 +418,6 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models on ImageNet-C")
     parser.add_argument("--dataset_path", type=str, default="./data/nano-imagenet-c", help="Path to the dataset (folder, .tar file, or HF repo ID).")
-    parser.add_argument("--metadata_path", type=str, default="./data", help="Path to the directory containing class_index.json and corruption_index.json.")
     parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3_5-1B", help="Hugging Face model identifier.")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of images to evaluate. If not provided, evaluates the entire dataset.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
