@@ -1,0 +1,9 @@
+torch
+torchvision
+transformers
+accelerate
+tqdm
+webdataset
+numpy
+Pillow
+requests

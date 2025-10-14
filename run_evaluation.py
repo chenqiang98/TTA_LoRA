@@ -252,7 +252,7 @@ def evaluate(predictions, true_labels, class_names_map, task_name, quick_validat
     print(f"\nOverall {task_name} Accuracy: {total_correct}/{len(predictions)} = {accuracy:.2f}%")
     return accuracy
 
-def save_results_to_json(log_path, command, args, results):
+def save_results_to_json(log_path, command, args, results, prompts):
     """Saves the experiment parameters and results to a JSON file."""
     
     results_dir = os.path.dirname(log_path)
@@ -264,7 +264,8 @@ def save_results_to_json(log_path, command, args, results):
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "command": command,
         "parameters": vars(args),
-        "results": results
+        "results": results,
+        "prompts": prompts
     }
 
     log_data = []
@@ -392,23 +393,38 @@ def main(args):
 
     # --- Task: Classification ---
     results_dict = {}
+    prompts_used = {}
     if args.task in ['classification', 'all']:
+        # prompt_template = (
+        #     "<image>\n"
+        #     "Please select the most appropriate word from the following 1000 ImageNet categories that best describes the content of the image: [{class_list}]. "
+        #     "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
+        # )
         prompt_template = (
             "<image>\n"
-            "Please select the most appropriate word from the following 1000 ImageNet categories that best describes the content of the image: [{class_list}]. "
-            "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
+            "As an expert image analyst, identify the primary category of the subject in the image.\n\n"
+            "Choose your answer from the following list: [{class_list}]\n\n"
+            "Your answer must be a single word from the list."
         )
+        prompts_used["classification_prompt"] = prompt_template
         predictions = batch_predict(model, tokenizer, images, class_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
         classification_accuracy = evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
         results_dict["classification_accuracy"] = round(classification_accuracy, 2)
 
     # --- Task: Corruption Detection ---
     if args.task in ['corruption', 'all']:
+        # prompt_template = (
+        #     "<image>\n"
+        #     "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
+        #     "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
+        # )
         prompt_template = (
             "<image>\n"
-            "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
-            "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
+            "As an expert in digital image forensics, identify the type of corruption present in this image.\n\n"
+            "Choose your answer from the following list: [{class_list}]\n\n"
+            "Your answer must be a single word from the list."
         )
+        prompts_used["corruption_prompt"] = prompt_template
         predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
         corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
         results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
@@ -431,43 +447,40 @@ def main(args):
     log_path = os.path.join("./results", log_filename)
 
     command = "python " + " ".join(sys.argv)
-    save_results_to_json(log_path, command, args, results_dict)
+    save_results_to_json(log_path, command, args, results_dict, prompts_used)
 
 
 if __name__ == "__main__":
     """
     Example Usage:
     ------------------------------------------------------------------------------------
-    All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency, unless specified otherwise.
     
-    1. Evaluate on the local 'nano-imagenet-c' folder dataset:
-       python run_evaluation.py --dataset_path ./data/nano-imagenet-c
+    1. Quick Sanity Check (evaluates a few samples from the nano dataset):
+       python run_evaluation.py --quick_validate
     
-    2. Evaluate with a different model (e.g., SmolVLM) on the nano dataset:
+    2. Evaluate a specific model on the full local 'nano-imagenet-c' dataset:
        python run_evaluation.py \
            --dataset_path ./data/nano-imagenet-c \
            --model_name HuggingFaceTB/SmolVLM-500M-Instruct
 
-    3. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
+    3. Evaluate the default model on the 'nano-imagenet-c' dataset from Hugging Face Hub:
        python run_evaluation.py --dataset_path niuniandaji/nano-imagenet-c
     
-    4. Evaluate on a local .tar webdataset file, limiting to 100 samples for a quick test:
-       python run_evaluation.py \
-           --dataset_path ./data/nano-ImageNet-C.tar \
-           --num_samples 100
-
-    5. Run in quick validation mode (uses a small, fixed number of samples and smaller batch size):
-       python run_evaluation.py --quick_validate
-    
-    6. Evaluate only the 'corruption' detection task on the nano dataset folder:
+    4. Evaluate only the 'classification' task and limit to 100 samples:
        python run_evaluation.py \
            --dataset_path ./data/nano-imagenet-c \
-           --task corruption
+           --task classification \
+           --num_samples 100
+    
     ------------------------------------------------------------------------------------
     
-    Notes on available models and datasets:
-    
-    - **Models**: This script is compatible with various Vision-Language Models from Hugging Face.
+    Notes:
+    - Results are automatically saved to a JSON file in the './results' directory.
+    - The log file is named based on the model and dataset used.
+    - Metadata files (e.g., class indices) are expected in the './data' directory.
+
+    Available Models & Datasets:
+    - Models: This script is compatible with various Vision-Language Models from Hugging Face.
       Some tested models include:
       - OpenGVLab/InternVL3-1B
       - OpenGVLab/InternVL3_5-1B
@@ -475,7 +488,7 @@ if __name__ == "__main__":
       - HuggingFaceTB/SmolVLM-256M-Instruct
       - HuggingFaceTB/SmolVLM-500M-Instruct
 
-    - **Datasets**: The --dataset_path argument supports three formats:
+    - Datasets: The --dataset_path argument supports three formats:
       1. Path to a local folder (e.g., ./data/mini-ImageNet-C)
       2. Path to a local .tar webdataset file (e.g., ./data/nano-ImageNet-C.tar)
       3. A Hugging Face Hub dataset ID (e.g., niuniandaji/nano-imagenet-c)
