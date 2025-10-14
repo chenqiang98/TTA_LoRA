@@ -64,6 +64,57 @@ def sample_and_copy_files(source_dir, output_dir, num_samples, seed, scan_report
     print("File copying complete.")
     return True
 
+def generate_readme_content(repo_id, seed, python_version, tar_filename, script_filename):
+    """
+    Generates the content for the README.md file for the Hugging Face dataset.
+    """
+    return f"""---
+license: mit
+tags:
+- image-classification
+- computer-vision
+- imagenet-c
+---
+
+# Nano ImageNet-C (Severity 5)
+
+This is a randomly sampled subset of the ImageNet-C dataset, containing 5,000 images exclusively from corruption **severity level 5**. It is designed for efficient testing and validation of model robustness.
+
+这是一个从 ImageNet-C 数据集中随机抽样的子集，包含 5000 张仅来自损坏等级为 **5** 的图像。它旨在用于高效地测试和验证模型的鲁棒性。
+
+## How to Generate / 如何生成
+
+This dataset was generated using the `{script_filename}` script included in this repository. To ensure reproducibility, the following parameters were used:
+
+本数据集使用此仓库中包含的 `{script_filename}` 脚本生成。为确保可复现性，生成时使用了以下参数：
+
+- **Source Dataset / 源数据集**: The full ImageNet-C dataset is required. / 需要完整的 ImageNet-C 数据集。
+- **Random Seed / 随机种子**: `{seed}`
+- **Python Version / Python 版本**: `{python_version}`
+
+## Dataset Structure / 数据集结构
+
+The dataset is provided as a single `.tar` file named `{tar_filename}` in the `webdataset` format. The internal structure preserves the original ImageNet-C hierarchy: `corruption_type/class_name/image.jpg`.
+
+数据集以 `webdataset` 格式打包在名为 `{tar_filename}` 的单个 `.tar` 文件中。其内部结构保留了原始 ImageNet-C 的层次结构：`corruption_type/class_name/image.jpg`。
+
+## Citation / 引用
+
+If you use this dataset, please cite the original ImageNet-C paper:
+
+如果您使用此数据集，请引用原始 ImageNet-C 的论文：
+
+```bibtex
+@inproceedings{{danhendrycks2019robustness,
+  title={{Benchmarking Neural Network Robustness to Common Corruptions and Perturbations}},
+  author={{Dan Hendrycks and Thomas Dietterich}},
+  booktitle={{International Conference on Learning Representations}},
+  year={{2019}},
+  url={{https://openreview.net/forum?id=HJz6tiCqYm}},
+}}
+```
+"""
+
 def package_with_webdataset(output_dir, tar_path):
     """
     Packages the contents of a directory into a single .tar file using webdataset.
@@ -88,11 +139,11 @@ def package_with_webdataset(output_dir, tar_path):
     
     print("Packaging complete.")
 
-def upload_to_hf(tar_path, repo_id):
+def upload_to_hf(tar_path, readme_path, script_path, repo_id):
     """
     Uploads a file to a specified Hugging Face Hub repository.
     """
-    print(f"5. Uploading '{tar_path}' to Hugging Face Hub repository: {repo_id}...")
+    print(f"5. Uploading files to Hugging Face Hub repository: {repo_id}...")
     
     if HfFolder.get_token() is None:
         print("Hugging Face token not found. Please log in using `huggingface-cli login` first.")
@@ -103,10 +154,28 @@ def upload_to_hf(tar_path, repo_id):
         print(f"Creating repository '{repo_id}' (if it doesn't exist)...")
         api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
         
-        print("Uploading file...")
+        print("Uploading README.md...")
+        api.upload_file(
+            path_or_fileobj=readme_path,
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            repo_type="dataset"
+        )
+        
+        script_filename = os.path.basename(script_path)
+        print(f"Uploading generation script '{script_filename}'...")
+        api.upload_file(
+            path_or_fileobj=script_path,
+            path_in_repo=script_filename,
+            repo_id=repo_id,
+            repo_type="dataset"
+        )
+
+        tar_filename = os.path.basename(tar_path)
+        print(f"Uploading dataset file '{tar_filename}'...")
         api.upload_file(
             path_or_fileobj=tar_path,
-            path_in_repo=os.path.basename(tar_path),
+            path_in_repo=tar_filename,
             repo_id=repo_id,
             repo_type="dataset"
         )
@@ -132,9 +201,25 @@ def main():
     print("--- Starting Dataset Creation Process ---")
     print("IMPORTANT: The script is configured to sample ONLY from severity level 5.")
     
+    # Generate README content
+    script_filename = os.path.basename(__file__)
+    readme_content = generate_readme_content(
+        args.repo_id, 
+        args.seed, 
+        "3.10.14", 
+        os.path.basename(args.tar_path), 
+        script_filename
+    )
+    
+    # Write README to a local file
+    readme_path = "README.md"
+    with open(readme_path, "w", encoding="utf-8") as f:
+        f.write(readme_content)
+    print(f"Generated README.md for the dataset.")
+
     if sample_and_copy_files(args.source_dir, args.output_dir, args.num_samples, args.seed, args.scan_report_interval):
         package_with_webdataset(args.output_dir, args.tar_path)
-        upload_to_hf(args.tar_path, args.repo_id)
+        upload_to_hf(args.tar_path, readme_path, script_filename, args.repo_id)
 
     print("--- Process Finished ---")
 
