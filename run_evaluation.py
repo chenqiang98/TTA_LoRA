@@ -158,7 +158,8 @@ def collect_data(dataloader, num_samples):
     """Collects a specified number of samples from the dataloader."""
     images, labels = [], ([], [], [])
     
-    pbar = tqdm(total=num_samples if num_samples is not None else 'Unknown', desc="Collecting data")
+    # Initialize tqdm with total=num_samples. It correctly handles None for unknown totals.
+    pbar = tqdm(total=num_samples, desc="Collecting data")
     
     collected_count = 0
     for images_batch, labels_batch in dataloader:
@@ -317,8 +318,19 @@ def main(args):
         corruption_index = json.load(f)
     corruption_names = list(corruption_index.keys())
 
+    # Determine the number of samples to process
+    num_samples_to_collect = args.num_samples
+    if num_samples_to_collect is None:
+        try:
+            # For map-style datasets (folders), we can get the full length
+            num_samples_to_collect = len(dataset)
+            print(f"No --num_samples provided. Evaluating all {num_samples_to_collect} samples from the dataset.")
+        except TypeError:
+            # For iterable datasets (webdataset), length is unknown beforehand
+            print("No --num_samples provided. Evaluating all samples from the iterable dataset.")
+
     # Collect data
-    images, labels = collect_data(dataloader, args.num_samples)
+    images, labels = collect_data(dataloader, num_samples_to_collect)
     if images is None:
         print("Could not collect any data. Exiting.")
         return
