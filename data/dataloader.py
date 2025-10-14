@@ -6,6 +6,7 @@ from torchvision import transforms
 from PIL import Image
 import tarfile
 import io
+from tqdm import tqdm
 
 image_transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -14,77 +15,69 @@ image_transform = transforms.Compose([
     ])
 
 class TTALoRADataset(torch.utils.data.Dataset):
-    def __init__(self, 
-               dataset_folder = None,
-               download_dataset = False, # 是否下载数据集
-               target_model = None, 
-               corruption_index = None, 
-               class_index = None,
-                transform = image_transform,
-                input_size=224, 
-                max_num=12, 
-                data_process_function = None, # 每一个图片在调用前的处理函数，输入为一张图片，留空为不处理
-                kwargs = None, # 其他参数
-                ) -> None:
-        self.dataset_folder = dataset_folder
+    """
+    A custom dataset for TTA-LoRA evaluation on Mini-ImageNet-C.
+    """
+    def __init__(self, dataset_folder, download_dataset=False, target_model='ViT', transform=None, quick_validate=False):
+        """
+        Initializes the dataset.
+        Args:
+            dataset_folder (str): The path to the dataset folder.
+            download_dataset (bool): Whether to download the dataset if not found.
+            target_model (str): The target model type ('ViT' or 'MLLM').
+            transform (callable, optional): Optional transform to be applied on a sample.
+            quick_validate (bool): If True, loads only a small subset of data for quick validation.
+        """
+        self.dataset_folder = Path(dataset_folder)
         self.target_model = target_model
-        
+        self.transform = transform
+        self.quick_validate = quick_validate
+
         # 设置默认的文件路径，基于当前文件的位置
         current_dir = Path(__file__).parent
-        self.corruption_index = corruption_index if corruption_index else current_dir / 'corruption_index.json'
-        self.class_index = class_index if class_index else current_dir / 'imagenet_class_index.json'
+        self.corruption_index = current_dir / 'corruption_index.json'
+        self.class_index = current_dir / 'imagenet_class_index.json'
         
-        self.transform = transform
-        self.input_size = input_size
-        self.max_num = max_num
-        self.data_process_function = data_process_function
-        self.kwargs = kwargs
+        if not self.dataset_folder.exists() and download_dataset:
+            self._download_and_extract_dataset()
 
-        self.dataset_url = 'https://huggingface.co/datasets/niuniandaji/mini-imagenet-c'
-
-        if download_dataset:
-            self._download_dataset()
-
-        # 初始化时加载数据集
-        self.image_paths, self.labels = self._load_dataset()
+        self.image_paths, self.labels = self._load_image_paths_and_labels(
+            self.dataset_folder, self.class_index, self.corruption_index, self.quick_validate
+        )
 
     def _download_dataset(self):
         raise NotImplementedError(f"Download dataset is not implemented, please go to {self.dataset_url} to download the dataset")
 
-    def _load_dataset(self):
+    def _load_image_paths_and_labels(self, dataset_folder, class_index_path, corruption_index_path, quick_validate=False):
         """
-        加载数据集，返回包含图像路径和标签的列表
-        标签格式为 [corruption_type, class_index]
+        Loads image paths and labels from the dataset folder.
+        Supports both tarball and regular folder structures.
         """
-        if not self.dataset_folder:
-            raise ValueError("数据集文件夹路径不能为空")
-        
-        dataset_root = Path(self.dataset_folder)
-        if not dataset_root.exists():
-            raise FileNotFoundError(f"数据集文件夹不存在: {self.dataset_folder}")
-        
-        # 加载类别索引映射
-        with open(self.class_index, 'r') as f:
-            class_index_data = json.load(f)
-        
-        # 加载corruption索引映射
-        with open(self.corruption_index, 'r') as f:
-            corruption_index_data = json.load(f)
-        
         image_paths = []
         labels = []
+
+        with open(class_index_path, 'r') as f:
+            class_index_data = json.load(f)
+
+        with open(corruption_index_path, 'r') as f:
+            corruption_index_data = json.load(f)
         
-        # 遍历corruption类型文件夹
-        for corruption_name in os.listdir(dataset_root):
-            corruption_path = dataset_root / corruption_name
-            if not corruption_path.is_dir() or corruption_name == '.git':
+        corruption_types = list(corruption_index_data.keys())
+        if quick_validate:
+            corruption_types = corruption_types[:1]
+            print(f"\n[Quick Validation Mode] Loading only the first corruption type: {corruption_types[0]}")
+
+        for corruption_type in tqdm(corruption_types, desc="Loading dataset"):
+            corruption_path = dataset_folder / corruption_type
+            if not corruption_path.exists():
+                print(f"Warning: Corruption directory not found: {corruption_path}")
                 continue
                 
-            if corruption_name not in corruption_index_data:
-                print(f"警告: corruption类型 '{corruption_name}' 不在索引文件中，跳过")
+            if corruption_type not in corruption_index_data:
+                print(f"警告: corruption类型 '{corruption_type}' 不在索引文件中，跳过")
                 continue
             
-            corruption_type = corruption_index_data[corruption_name]
+            corruption_type_data = corruption_index_data[corruption_type]
             
             # 遍历severity级别文件夹
             for severity_name in os.listdir(corruption_path):
@@ -120,25 +113,31 @@ class TTALoRADataset(torch.utils.data.Dataset):
                                                     class_index = int(cls_data.read().decode('utf-8').strip())
                                                     # 存储tar文件路径和成员名称的元组
                                                     image_paths.append((str(tar_file), member.name))
-                                                    labels.append([corruption_type, class_index])
+                                                    labels.append([corruption_type_data, class_index])
                                                 except (ValueError, UnicodeDecodeError):
                                                     print(f"警告: 无法解析类别标签 {cls_member_name}")
                         except Exception as e:
                             print(f"警告: 处理tar文件 {tar_file} 时出错: {e}")
                 else:
-                    # 处理普通文件夹格式
-                    for image_file in os.listdir(severity_path):
-                        if not image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    # 处理普通文件夹格式，其结构为 severity/class/image.jpg
+                    # 首先，为了提高效率，创建一个从WordNet ID到类别索引的逆向映射
+                    wordnet_to_index = {v[0]: int(k) for k, v in class_index_data.items()}
+
+                    for class_dir in os.listdir(severity_path):
+                        class_path = severity_path / class_dir
+                        if not os.path.isdir(class_path):
                             continue
                         
-                        image_path = severity_path / image_file
-                        
-                        # 从文件名中提取类别索引
-                        class_index = self._extract_class_index_from_filename(image_file, class_index_data)
+                        # 目录名即为类别ID (例如 'n01440764')
+                        class_id = class_dir
+                        class_index = wordnet_to_index.get(class_id)
                         
                         if class_index is not None:
-                            image_paths.append(str(image_path))
-                            labels.append([corruption_type, class_index])
+                            for image_file in os.listdir(class_path):
+                                if image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                                    image_path = class_path / image_file
+                                    image_paths.append(str(image_path))
+                                    labels.append([corruption_type_data, class_index])
 
             print(f"从{corruption_path}加载了 {len([p for p in image_paths if (isinstance(p, tuple) and str(corruption_path) in p[0]) or (isinstance(p, str) and str(corruption_path) in p)])} 张图片")
         
