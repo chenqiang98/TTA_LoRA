@@ -15,7 +15,7 @@ import os
 import sys
 import datetime
 
-from data.dataloader import TTALoRADataset, build_transform, worker_init_fn, WebTTALoRADataset
+from data.dataloader import TTALoRADataset, worker_init_fn, WebTTALoRADataset
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -374,27 +374,27 @@ if __name__ == "__main__":
     All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency.
     
     1. Evaluate on the local 'nano-imagenet-c' folder dataset:
-       python run_evaluation.py \\
-           --dataset_path ./data/nano-imagenet-c \\
+       python run_evaluation.py \
+           --dataset_path ./data/nano-imagenet-c \
            --model_name OpenGVLab/InternVL3_5-1B
     
     2. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
-       python run_evaluation.py \\
-           --dataset_path niuniandaji/nano-imagenet-c \\
+       python run_evaluation.py \
+           --dataset_path niuniandaji/nano-imagenet-c \
            --metadata_path ./data 
     
     3. Evaluate on a local .tar webdataset file, limiting to 100 samples for a quick test:
-       python run_evaluation.py \\
-           --dataset_path ./data/nano-ImageNet-C.tar \\
-           --metadata_path ./data \\
+       python run_evaluation.py \
+           --dataset_path ./data/nano-ImageNet-C.tar \
+           --metadata_path ./data \
            --num_samples 100
 
     4. Run in quick validation mode (uses a small, fixed number of samples and smaller batch size):
        python run_evaluation.py --quick_validate
     
     5. Evaluate only the 'corruption' detection task on the nano dataset folder:
-       python run_evaluation.py \\
-           --dataset_path ./data/nano-imagenet-c \\
+       python run_evaluation.py \
+           --dataset_path ./data/nano-imagenet-c \
            --task corruption
     ------------------------------------------------------------------------------------
     
