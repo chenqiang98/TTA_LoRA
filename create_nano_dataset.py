@@ -10,20 +10,27 @@ def sample_and_copy_files(source_dir, output_dir, num_samples, seed, scan_report
     """
     Scans a source directory, randomly samples image files, and copies them 
     to an output directory, preserving the original structure.
+
+    IMPORTANT: This script is currently hardcoded to only sample images from
+    corruption severity level 5.
     """
     print(f"1. Scanning for image files in '{source_dir}'...")
     all_files = []
     count = 0
     for root, _, files in os.walk(source_dir):
-        for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-                all_files.append(os.path.join(root, file))
-                count += 1
-                if count > 0 and count % scan_report_interval == 0:
-                    print(f"   ...scanned {count} images...")
+        # HARDCODED FILTER: Only include files from severity level 5 directories.
+        # We check if '5' is a component of the directory path.
+        path_parts = root.split(os.sep)
+        if '5' in path_parts:
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                    all_files.append(os.path.join(root, file))
+                    count += 1
+                    if count > 0 and count % scan_report_interval == 0:
+                        print(f"   ...scanned {count} images (from severity 5)...")
     
     if not all_files:
-        print(f"Error: No image files found in '{source_dir}'. Exiting.")
+        print(f"Error: No image files found for severity level 5 in '{source_dir}'. Exiting.")
         return False
     
     print(f"Found {len(all_files)} total images.")
@@ -123,6 +130,7 @@ def main():
     args = parser.parse_args()
 
     print("--- Starting Dataset Creation Process ---")
+    print("IMPORTANT: The script is configured to sample ONLY from severity level 5.")
     
     if sample_and_copy_files(args.source_dir, args.output_dir, args.num_samples, args.seed, args.scan_report_interval):
         package_with_webdataset(args.output_dir, args.tar_path)
