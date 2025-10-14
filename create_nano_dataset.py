@@ -6,17 +6,21 @@ from tqdm import tqdm
 import webdataset as wds
 from huggingface_hub import HfApi, HfFolder
 
-def sample_and_copy_files(source_dir, output_dir, num_samples, seed):
+def sample_and_copy_files(source_dir, output_dir, num_samples, seed, scan_report_interval):
     """
     Scans a source directory, randomly samples image files, and copies them 
     to an output directory, preserving the original structure.
     """
     print(f"1. Scanning for image files in '{source_dir}'...")
     all_files = []
+    count = 0
     for root, _, files in os.walk(source_dir):
         for file in files:
             if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
                 all_files.append(os.path.join(root, file))
+                count += 1
+                if count > 0 and count % scan_report_interval == 0:
+                    print(f"   ...scanned {count} images...")
     
     if not all_files:
         print(f"Error: No image files found in '{source_dir}'. Exiting.")
@@ -115,11 +119,12 @@ def main():
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--repo_id", type=str, default="niuniandaji/nano-imagenet-c", help="The Hugging Face Hub repository ID.")
     parser.add_argument("--tar_path", type=str, default="./data/nano-ImageNet-C.tar", help="Path to save the final webdataset archive.")
+    parser.add_argument("--scan_report_interval", type=int, default=50000, help="How often to report progress during file scanning.")
     args = parser.parse_args()
 
     print("--- Starting Dataset Creation Process ---")
     
-    if sample_and_copy_files(args.source_dir, args.output_dir, args.num_samples, args.seed):
+    if sample_and_copy_files(args.source_dir, args.output_dir, args.num_samples, args.seed, args.scan_report_interval):
         package_with_webdataset(args.output_dir, args.tar_path)
         upload_to_hf(args.tar_path, args.repo_id)
 
