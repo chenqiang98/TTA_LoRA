@@ -101,6 +101,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             quick_validate (bool): If True, loads only a small subset of data for quick validation.
         """
+        self.data_process_function = None
         self.dataset_folder = Path(dataset_folder)
         self.target_model = target_model
         self.transform = transform
@@ -158,6 +159,12 @@ class TTALoRADataset(torch.utils.data.Dataset):
                 if not severity_path.is_dir():
                     continue
                 
+                try:
+                    severity = int(severity_name)
+                except ValueError:
+                    print(f"警告: 无法从目录名 {severity_name} 解析severity，跳过")
+                    continue
+                
                 # 检查是否为tar文件格式的WebDataset
                 tar_files = list(severity_path.glob("*.tar"))
                 if tar_files:
@@ -186,7 +193,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
                                                     class_index = int(cls_data.read().decode('utf-8').strip())
                                                     # 存储tar文件路径和成员名称的元组
                                                     image_paths.append((str(tar_file), member.name))
-                                                    labels.append([corruption_type_data, class_index])
+                                                    labels.append([corruption_type_data, class_index, severity])
                                                 except (ValueError, UnicodeDecodeError):
                                                     print(f"警告: 无法解析类别标签 {cls_member_name}")
                         except Exception as e:
@@ -210,7 +217,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
                                 if image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
                                     image_path = class_path / image_file
                                     image_paths.append(str(image_path))
-                                    labels.append([corruption_type_data, class_index])
+                                    labels.append([corruption_type_data, class_index, severity])
 
             print(f"从{corruption_path}加载了 {len([p for p in image_paths if (isinstance(p, tuple) and str(corruption_path) in p[0]) or (isinstance(p, str) and str(corruption_path) in p)])} 张图片")
         

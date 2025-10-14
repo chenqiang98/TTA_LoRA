@@ -116,9 +116,10 @@ def create_prompt(class_names, prompt_template):
     class_list_str = ", ".join(class_names)
     return prompt_template.format(class_list=class_list_str)
 
-def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
+def batch_predict(model, tokenizer, all_images_tensor, class_names, prompt_template, device):
     """
-    Performs batch prediction on a set of images given a list of candidate classes.
+    Performs prediction on a set of images given a list of candidate classes.
+    Note: This function processes images one by one, not in a batch.
     """
     results = []
     generation_config = dict(
@@ -130,22 +131,22 @@ def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
     question = create_prompt(class_names, prompt_template)
 
     all_pixel_values = []
-    print(f"Preparing {images_batch.shape[0]} images for prediction...")
+    print(f"Preparing {all_images_tensor.shape[0]} images for prediction...")
     print(f"Choosing from {len(class_names)} candidate classes.")
 
-    for i in tqdm(range(images_batch.shape[0]), desc="Preprocessing images"):
-        single_image = images_batch[i]
+    for i in tqdm(range(all_images_tensor.shape[0]), desc="Preprocessing images"):
+        single_image = all_images_tensor[i]
         mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
         std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
         denorm_image = torch.clamp(single_image * std + mean, 0, 1)
         pil_image = T.ToPILImage()(denorm_image)
-        pixel_values = load_image(pil_image, max_num=12).to(torch.bfloat16).cuda()
+        pixel_values = load_image(pil_image, max_num=12).to(torch.bfloat16).to(device)
         all_pixel_values.append(pixel_values)
 
     print("Starting batch inference...")
     with torch.no_grad():
-        batch_size = len(all_pixel_values)
-        for i in tqdm(range(batch_size), desc="Running Inference"):
+        num_images = len(all_pixel_values)
+        for i in tqdm(range(num_images), desc="Running Inference"):
             try:
                 response = model.chat(tokenizer, all_pixel_values[i], question, generation_config)
                 results.append(response)
@@ -172,10 +173,16 @@ def collect_data(dataloader, num_samples):
             if num_to_take > remaining:
                 num_to_take = remaining
                 images_batch = images_batch[:num_to_take]
-                labels_batch = [l[:num_to_take] for l in labels_batch]
+                
+                # Ensure labels_batch is also sliced if it's a list/tuple of tensors
+                if isinstance(labels_batch, (list, tuple)):
+                    labels_batch = [l[:num_to_take] for l in labels_batch]
+                else: # Assuming it's a single tensor
+                    labels_batch = labels_batch[:num_to_take]
 
         images.append(images_batch)
-        for i in range(len(labels)):
+        # labels_batch is a list of tensors, one for each label type
+        for i in range(len(labels_batch)):
             labels[i].append(labels_batch[i])
         
         collected_count += num_to_take
@@ -184,11 +191,11 @@ def collect_data(dataloader, num_samples):
     pbar.close()
 
     if not images:
-        print("No data collected from the dataloader.")
+        print("No data collected from the dataloaloader.")
         return None, None
 
-    combined_images = torch.cat(all_images, dim=0)[:num_samples]
-    combined_labels = [torch.cat([label[j] for label in all_labels], dim=0)[:num_samples] for j in range(len(all_labels[0]))]
+    combined_images = torch.cat(images, dim=0)
+    combined_labels = [torch.cat(l, dim=0) for l in labels]
     return combined_images, combined_labels
 
 def evaluate(predictions, true_labels, class_names_map, task_name, quick_validate=False):
@@ -274,6 +281,24 @@ def main(args):
         print(f"Batch size set to {args.batch_size}")
         print("----------------------------------------\n")
 
+    # Determine device
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Load model and tokenizer from Hugging Face
+    print(f"Loading model and tokenizer from: {args.model_name}")
+    model = AutoModel.from_pretrained(
+        args.model_name,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    ).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    print("Model and tokenizer loaded successfully.")
+
     # Setup dataset and dataloader
     mllm_transform = build_transform(224)
     
@@ -345,7 +370,7 @@ def main(args):
             "Please select the most appropriate word from the following 1000 ImageNet categories that best describes the content of the image: [{class_list}]. "
             "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
         )
-        predictions = batch_predict(model, tokenizer, images, class_names, prompt_template)
+        predictions = batch_predict(model, tokenizer, images, class_names, prompt_template, device)
         classification_accuracy = evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
         results_dict["classification_accuracy"] = round(classification_accuracy, 2)
 
@@ -356,7 +381,7 @@ def main(args):
             "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
             "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
         )
-        predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template)
+        predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device)
         corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
         results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
 
@@ -416,7 +441,7 @@ if __name__ == "__main__":
     
     - **Models**: This script is compatible with various Vision-Language Models from Hugging Face.
       Some tested models include:
-      - OpenGVLab/InternVL3_1B
+      - OpenGVLab/InternVL3-1B
       - OpenGVLab/InternVL3_5-1B
       - OpenGVLab/InternVL3_5-2B
       - HuggingFaceTB/SmolVLM-256M-Instruct
@@ -430,12 +455,13 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models on ImageNet-C")
     parser.add_argument("--dataset_path", type=str, default="./data/nano-imagenet-c", help="Path to the dataset (folder, .tar file, or HF repo ID).")
-    parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3_5-1B", help="Hugging Face model identifier.")
+    parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3-1B", help="Hugging Face model identifier.")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of images to evaluate. If not provided, evaluates the entire dataset.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
+    parser.add_argument("--device", type=str, default=None, help="Device to use for computation (e.g., 'cpu', 'cuda'). Defaults to auto-detection.")
     
     args = parser.parse_args()
     main(args)
