@@ -145,7 +145,7 @@ def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
         for i in tqdm(range(batch_size), desc="Running Inference"):
             try:
                 response = model.chat(tokenizer, all_pixel_values[i], question, generation_config)
-                results.append(response.strip())
+                results.append(response)
             except Exception as e:
                 print(f"Error predicting image {i+1}: {e}")
                 results.append(f"Prediction failed: {str(e)}")
@@ -170,7 +170,7 @@ def collect_data(dataloader, num_samples):
     combined_labels = [torch.cat([label[j] for label in all_labels], dim=0)[:num_samples] for j in range(len(all_labels[0]))]
     return combined_images, combined_labels
 
-def evaluate(predictions, true_labels, class_names_map, task_name):
+def evaluate(predictions, true_labels, class_names_map, task_name, quick_validate=False):
     """Evaluates the predictions and prints the results."""
     print(f"\n--- {task_name} Prediction Results ---")
     
@@ -184,10 +184,14 @@ def evaluate(predictions, true_labels, class_names_map, task_name):
     for i in range(min(10, len(predictions))):
         true_idx = true_labels[i].item()
         true_name = idx_to_name.get(true_idx, "Unknown") if isinstance(idx_to_name, dict) else idx_to_name[true_idx]
-        predicted_name = predictions[i]
+        
+        raw_prediction = predictions[i]
+        predicted_name = raw_prediction.strip()
         is_correct = true_name.replace(" ", "").lower() == predicted_name.replace(" ", "").lower()
         
         print(f"\nImage {i+1}:")
+        if quick_validate:
+            print(f"  Raw Output: '{raw_prediction}'")
         print(f"  True Label: {true_name} (Index: {true_idx})")
         print(f"  Predicted Label: {predicted_name}")
         print(f"  Correct: {'Yes' if is_correct else 'No'}")
@@ -197,7 +201,7 @@ def evaluate(predictions, true_labels, class_names_map, task_name):
     for i in range(len(predictions)):
         true_idx = true_labels[i].item()
         true_name = idx_to_name.get(true_idx, "Unknown") if isinstance(idx_to_name, dict) else idx_to_name[true_idx]
-        predicted_name = predictions[i]
+        predicted_name = predictions[i].strip()
         if true_name.replace(" ", "").lower() == predicted_name.replace(" ", "").lower():
             total_correct += 1
             
@@ -269,7 +273,7 @@ def main(args):
             "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
         )
         predictions = batch_predict(model, tokenizer, images, class_names, prompt_template)
-        evaluate(predictions, labels[1], class_names, "Classification")
+        evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
 
     # --- Task: Corruption Detection ---
     if args.task in ['corruption', 'all']:
@@ -279,18 +283,28 @@ def main(args):
             "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
         )
         predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template)
-        evaluate(predictions, labels[0], corruption_index, "Corruption Type")
+        evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
 
 
 if __name__ == "__main__":
+    """
+    Example:
+    python run_evaluation.py 
+    Model: 
+    1. OpenGVLab/InternVL3_1B
+    2. OpenGVLab/InternVL3_5-1B
+    3. OpenGVLab/InternVL3_5-2B
+    4. HuggingFaceTB/SmolVLM-256M-Instruct
+    5. HuggingFaceTB/SmolVLM-500M-Instruct
+    """
     parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models on ImageNet-C")
     parser.add_argument("--dataset_folder", type=str, default="./data/mini-ImageNet-C", help="Path to the Mini-ImageNet-C dataset folder.")
-    parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3-1B", help="Hugging Face model identifier.")
+    parser.add_argument("--model_name", type=str, default="", help="Hugging Face model identifier.")
     parser.add_argument("--num_samples", type=int, default=5000, help="Number of images to evaluate.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
-
+    
     args = parser.parse_args()
     main(args)
