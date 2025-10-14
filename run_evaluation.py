@@ -306,7 +306,7 @@ def main(args):
     )
 
     # Load class and corruption indices
-    class_index_path = os.path.join(metadata_source_path, 'class_index.json')
+    class_index_path = os.path.join(metadata_source_path, 'imagenet_class_index.json')
     corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
 
     with open(class_index_path, 'r') as f:
