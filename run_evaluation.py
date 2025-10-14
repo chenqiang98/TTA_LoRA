@@ -12,6 +12,8 @@ from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
 import os
+import sys
+import datetime
 
 from data.dataloader import TTALoRADataset, build_transform, worker_init_fn, WebTTALoRADataset
 
@@ -223,8 +225,41 @@ def evaluate(predictions, true_labels, class_names_map, task_name, quick_validat
         if true_name.replace(" ", "").lower() == predicted_name.replace(" ", "").lower():
             total_correct += 1
             
-    accuracy = (total_correct / len(predictions)) * 100
+    accuracy = (total_correct / len(predictions)) * 100 if len(predictions) > 0 else 0
     print(f"\nOverall {task_name} Accuracy: {total_correct}/{len(predictions)} = {accuracy:.2f}%")
+    return accuracy
+
+def save_results_to_json(log_path, command, args, results):
+    """Saves the experiment parameters and results to a JSON file."""
+    
+    results_dir = os.path.dirname(log_path)
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+        print(f"Created results directory: {results_dir}")
+
+    log_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "command": command,
+        "parameters": vars(args),
+        "results": results
+    }
+
+    log_data = []
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            try:
+                log_data = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Warning: Could not decode existing log file at {log_path}. Starting a new log.")
+                log_data = []
+    
+    log_data.append(log_entry)
+
+    with open(log_path, 'w') as f:
+        json.dump(log_data, f, indent=4)
+    
+    print(f"Results saved to {log_path}")
+
 
 def main(args):
     """Main function to run the evaluation."""
@@ -289,6 +324,7 @@ def main(args):
     print(f"\nCollected {images.shape[0]} images for evaluation.")
 
     # --- Task: Classification ---
+    results_dict = {}
     if args.task in ['classification', 'all']:
         prompt_template = (
             "<image>\n"
@@ -296,7 +332,8 @@ def main(args):
             "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
         )
         predictions = batch_predict(model, tokenizer, images, class_names, prompt_template)
-        evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
+        classification_accuracy = evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
+        results_dict["classification_accuracy"] = round(classification_accuracy, 2)
 
     # --- Task: Corruption Detection ---
     if args.task in ['corruption', 'all']:
@@ -306,7 +343,28 @@ def main(args):
             "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
         )
         predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template)
-        evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
+        corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
+        results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
+
+    # --- Save results ---
+    # Generate a descriptive log file name based on model and dataset
+    model_name_short = args.model_name.split('/')[-1]
+    
+    dataset_base = os.path.basename(args.dataset_path).lower()
+    if 'nano-imagenet-c' in dataset_base:
+        dataset_name_short = 'nano'
+    elif 'mini-imagenet-c' in dataset_base:
+        dataset_name_short = 'mini'
+    elif 'imagenet-c' in dataset_base:
+        dataset_name_short = 'full'
+    else:
+        dataset_name_short = dataset_base.replace('.tar', '')
+
+    log_filename = f"{model_name_short}_on_{dataset_name_short}_log.json"
+    log_path = os.path.join("./results", log_filename)
+
+    command = "python " + " ".join(sys.argv)
+    save_results_to_json(log_path, command, args, results_dict)
 
 
 if __name__ == "__main__":
@@ -316,7 +374,9 @@ if __name__ == "__main__":
     All examples use the default model ('OpenGVLab/InternVL3_5-1B') for consistency.
     
     1. Evaluate on the local 'nano-imagenet-c' folder dataset:
-       python run_evaluation.py --dataset_path ./data/nano-imagenet-c
+       python run_evaluation.py \\
+           --dataset_path ./data/nano-imagenet-c \\
+           --model_name OpenGVLab/InternVL3_5-1B
     
     2. Evaluate on the 'nano-imagenet-c' dataset from Hugging Face Hub (evaluates all samples):
        python run_evaluation.py \\
