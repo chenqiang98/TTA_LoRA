@@ -7,12 +7,85 @@ from PIL import Image
 import tarfile
 import io
 from tqdm import tqdm
+import webdataset as wds
+from torch.utils.data import IterableDataset
 
 image_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+def worker_init_fn(worker_id):
+    """
+    Sets the seed for each worker in a DataLoader.
+    """
+    seed = 42 + worker_id
+    random.seed(seed)
+
+
+class WebTTALoRADataset(IterableDataset):
+    """
+    A dataset class for loading TTALoRA data from a webdataset.
+    This is an IterableDataset, suitable for streaming data.
+    """
+    def __init__(self, url, metadata_path, transform=None, quick_validate=False):
+        """
+        Args:
+            url (string): URL or path to the webdataset .tar file(s).
+            metadata_path (string): Path to the directory containing class_index.json and corruption_index.json.
+            transform (callable, optional): Optional transform to be applied on a sample.
+        """
+        super().__init__()
+        self.url = url
+        self.transform = transform
+        self.quick_validate = quick_validate
+
+        # Load metadata
+        self.class_index_path = os.path.join(metadata_path, 'class_index.json')
+        self.corruption_index_path = os.path.join(metadata_path, 'corruption_index.json')
+        
+        with open(self.class_index_path, 'r') as f:
+            self.class_index = json.load(f)
+        with open(self.corruption_index_path, 'r') as f:
+            self.corruption_index = json.load(f)
+        
+        # Create a reverse mapping from class name (e.g., n01440764) to class index (e.g., 0)
+        self.class_name_to_idx = {details[0]: int(idx) for idx, details in self.class_index.items()}
+
+    def __iter__(self):
+        # Create the dataset pipeline
+        # If the URL is from Hugging Face, prepend with 'hf://'
+        if "hf.co" in self.url or self.url.count("/") == 1:
+             dataset_url = f"pipe:curl -L hf://datasets/{self.url}/resolve/main/{os.path.basename(self.url).replace('.tar','')}.tar"
+        else:
+             dataset_url = self.url
+        
+        dataset = wds.WebDataset(dataset_url).decode("pil")
+
+        for sample in dataset:
+            # Extract key and image
+            key = sample['__key__']
+            image = sample['png'] if 'png' in sample else sample['jpg']
+
+            # Parse the key to get labels
+            try:
+                corruption_name, severity_str, class_name, _ = key.split('/')
+                severity = int(severity_str)
+                
+                corruption_label = self.corruption_index[corruption_name]
+                class_label = self.class_name_to_idx[class_name]
+
+                if self.transform:
+                    image = self.transform(image)
+                
+                yield image, (corruption_label, class_label, severity)
+
+            except (ValueError, KeyError) as e:
+                # This can happen if the key format is unexpected.
+                # print(f"Skipping sample with malformed key '{key}': {e}")
+                continue
+
 
 class TTALoRADataset(torch.utils.data.Dataset):
     """
@@ -28,6 +101,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             quick_validate (bool): If True, loads only a small subset of data for quick validation.
         """
+        self.data_process_function = None
         self.dataset_folder = Path(dataset_folder)
         self.target_model = target_model
         self.transform = transform
@@ -85,6 +159,12 @@ class TTALoRADataset(torch.utils.data.Dataset):
                 if not severity_path.is_dir():
                     continue
                 
+                try:
+                    severity = int(severity_name)
+                except ValueError:
+                    print(f"警告: 无法从目录名 {severity_name} 解析severity，跳过")
+                    continue
+                
                 # 检查是否为tar文件格式的WebDataset
                 tar_files = list(severity_path.glob("*.tar"))
                 if tar_files:
@@ -113,7 +193,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
                                                     class_index = int(cls_data.read().decode('utf-8').strip())
                                                     # 存储tar文件路径和成员名称的元组
                                                     image_paths.append((str(tar_file), member.name))
-                                                    labels.append([corruption_type_data, class_index])
+                                                    labels.append([corruption_type_data, class_index, severity])
                                                 except (ValueError, UnicodeDecodeError):
                                                     print(f"警告: 无法解析类别标签 {cls_member_name}")
                         except Exception as e:
@@ -137,7 +217,7 @@ class TTALoRADataset(torch.utils.data.Dataset):
                                 if image_file.lower().endswith(('.jpg', '.jpeg', '.png')):
                                     image_path = class_path / image_file
                                     image_paths.append(str(image_path))
-                                    labels.append([corruption_type_data, class_index])
+                                    labels.append([corruption_type_data, class_index, severity])
 
             print(f"从{corruption_path}加载了 {len([p for p in image_paths if (isinstance(p, tuple) and str(corruption_path) in p[0]) or (isinstance(p, str) and str(corruption_path) in p)])} 张图片")
         
@@ -205,22 +285,21 @@ class TTALoRADataset(torch.utils.data.Dataset):
                 tar_path, member_name = image_path
                 image = self._load_image_from_tar(tar_path, member_name)
                 if image is None:
-                    raise ValueError(f"无法从tar文件加载图像: {tar_path}#{member_name}")
+                    # Error is printed in the helper function, return None to skip.
+                    return None, None
             else:
                 # 普通文件路径
                 image = Image.open(image_path).convert('RGB')
             
-            # 应用变换
+            # Apply transforms if they are provided
             image, label = self._apply_transforms((image, label))
             
             return image, label
             
         except Exception as e:
-            print(f"加载图像时出错: {image_path}, 错误: {e}")
-            # 返回一个默认的空白图像和标签，避免中断训练
-            default_image = Image.new('RGB', (224, 224), color=(0, 0, 0))
-            default_image, label = self._apply_transforms((default_image, label))
-            return default_image, label
+            # This will catch errors from Image.open() for corrupted files
+            print(f"Warning: Could not load image {image_path}: {e}. Skipping.")
+            return None, None
 
     def __iter__(self):
         """

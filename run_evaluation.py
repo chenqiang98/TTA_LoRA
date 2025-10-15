@@ -11,8 +11,11 @@ from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
+import os
+import sys
+import datetime
 
-from data.dataloader import TTALoRADataset
+from data.dataloader import TTALoRADataset, worker_init_fn, WebTTALoRADataset
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -26,6 +29,14 @@ def set_seed(seed=7600):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def safe_pil_collate(batch):
+    """A collate function that filters out None values and returns lists."""
+    batch = list(filter(lambda x: x[0] is not None, batch))
+    if not batch:
+        return [], []  # Return empty lists if the whole batch is invalid
+    images, labels = zip(*batch)
+    return list(images), list(labels)
 
 def worker_init_fn(worker_id):
     """Worker init function for DataLoader to ensure reproducibility."""
@@ -113,9 +124,10 @@ def create_prompt(class_names, prompt_template):
     class_list_str = ", ".join(class_names)
     return prompt_template.format(class_list=class_list_str)
 
-def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
+def batch_predict(model, tokenizer, all_images, class_names, prompt_template, device, batch_size=8, dtype=torch.bfloat16):
     """
-    Performs batch prediction on a set of images given a list of candidate classes.
+    Performs prediction on a set of images given a list of candidate classes.
+    This function processes images in batches for efficiency.
     """
     results = []
     generation_config = dict(
@@ -125,50 +137,81 @@ def batch_predict(model, tokenizer, images_batch, class_names, prompt_template):
     )
 
     question = create_prompt(class_names, prompt_template)
-
-    all_pixel_values = []
-    print(f"Preparing {images_batch.shape[0]} images for prediction...")
+    
+    print(f"Preparing {len(all_images)} images for prediction...")
     print(f"Choosing from {len(class_names)} candidate classes.")
 
-    for i in tqdm(range(images_batch.shape[0]), desc="Preprocessing images"):
-        single_image = images_batch[i]
-        mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
-        std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
-        denorm_image = torch.clamp(single_image * std + mean, 0, 1)
-        pil_image = T.ToPILImage()(denorm_image)
-        pixel_values = load_image(pil_image, max_num=12).to(torch.bfloat16).cuda()
-        all_pixel_values.append(pixel_values)
-
-    print("Starting batch inference...")
     with torch.no_grad():
-        batch_size = len(all_pixel_values)
-        for i in tqdm(range(batch_size), desc="Running Inference"):
-            try:
-                response = model.chat(tokenizer, all_pixel_values[i], question, generation_config)
-                results.append(response)
-            except Exception as e:
-                print(f"Error predicting image {i+1}: {e}")
-                results.append(f"Prediction failed: {str(e)}")
+        # Create batches
+        for i in tqdm(range(0, len(all_images), batch_size), desc="Running Batched Inference"):
+            batch_images = all_images[i:i+batch_size]
+            
+            # Preprocess the batch of PIL images
+            batch_pixel_values = []
+            for image in batch_images:
+                # load_image preprocesses one image and creates patches
+                pixel_values = load_image(image, max_num=12).to(dtype).to(device)
+                batch_pixel_values.append(pixel_values)
+
+            # Since the number of patches can vary, we run inference image by image within the batch
+            # A more advanced implementation could pad patches to run the model on the whole batch at once
+            for j, pixel_values in enumerate(batch_pixel_values):
+                try:
+                    response = model.chat(tokenizer, pixel_values, question, generation_config)
+                    results.append(response)
+                except torch.cuda.OutOfMemoryError:
+                    print(f"CUDA Out of Memory on image {i+j+1}. Skipping.")
+                    results.append("Prediction failed: Out of Memory")
+                except Exception as e:
+                    print(f"Error predicting image {i+j+1}: {e}")
+                    results.append(f"Prediction failed: {str(e)}")
     return results
+
 
 def collect_data(dataloader, num_samples):
     """Collects a specified number of samples from the dataloader."""
-    all_images = []
-    all_labels = []
-    total_images = 0
-    for images, labels in tqdm(dataloader, desc="Collecting image data"):
-        all_images.append(images)
-        all_labels.append(labels)
-        total_images += images.shape[0]
-        if total_images >= num_samples:
+    images, labels = [], []
+    
+    pbar = tqdm(total=num_samples, desc="Collecting data")
+    
+    collected_count = 0
+    for images_batch, labels_batch in dataloader:
+        if not images_batch: # Handles empty batches from safe_pil_collate
+            continue
+
+        if num_samples is not None and collected_count >= num_samples:
             break
 
-    if not all_images:
+        num_to_take = len(images_batch)
+        if num_samples is not None:
+            remaining = num_samples - collected_count
+            if num_to_take > remaining:
+                num_to_take = remaining
+                images_batch = images_batch[:num_to_take]
+                labels_batch = labels_batch[:num_to_take]
+
+        images.extend(images_batch)
+        labels.extend(labels_batch)
+        
+        collected_count += num_to_take
+        pbar.update(num_to_take)
+
+    pbar.close()
+
+    if not images:
+        print("No data collected from the dataloader.")
         return None, None
 
-    combined_images = torch.cat(all_images, dim=0)[:num_samples]
-    combined_labels = [torch.cat([label[j] for label in all_labels], dim=0)[:num_samples] for j in range(len(all_labels[0]))]
-    return combined_images, combined_labels
+    # Transpose labels from [[c1, l1, s1], [c2, l2, s2]] to [[c1, c2], [l1, l2], [s1, s2]]
+    labels_transposed = list(zip(*labels))
+    
+    # Create tensors for each label type
+    corruption_labels = torch.tensor(labels_transposed[0])
+    class_labels = torch.tensor(labels_transposed[1])
+    severity_labels = torch.tensor(labels_transposed[2])
+
+    return images, (corruption_labels, class_labels, severity_labels)
+
 
 def evaluate(predictions, true_labels, class_names_map, task_name, quick_validate=False):
     """Evaluates the predictions and prints the results."""
@@ -205,8 +248,42 @@ def evaluate(predictions, true_labels, class_names_map, task_name, quick_validat
         if true_name.replace(" ", "").lower() == predicted_name.replace(" ", "").lower():
             total_correct += 1
             
-    accuracy = (total_correct / len(predictions)) * 100
+    accuracy = (total_correct / len(predictions)) * 100 if len(predictions) > 0 else 0
     print(f"\nOverall {task_name} Accuracy: {total_correct}/{len(predictions)} = {accuracy:.2f}%")
+    return accuracy
+
+def save_results_to_json(log_path, command, args, results, prompts):
+    """Saves the experiment parameters and results to a JSON file."""
+    
+    results_dir = os.path.dirname(log_path)
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+        print(f"Created results directory: {results_dir}")
+
+    log_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "command": command,
+        "parameters": vars(args),
+        "results": results,
+        "prompts": prompts
+    }
+
+    log_data = []
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            try:
+                log_data = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Warning: Could not decode existing log file at {log_path}. Starting a new log.")
+                log_data = []
+    
+    log_data.append(log_entry)
+
+    with open(log_path, 'w') as f:
+        json.dump(log_data, f, indent=4)
+    
+    print(f"Results saved to {log_path}")
+
 
 def main(args):
     """Main function to run the evaluation."""
@@ -220,91 +297,213 @@ def main(args):
         print(f"Batch size set to {args.batch_size}")
         print("----------------------------------------\n")
 
+    # Determine device
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Determine optimal dtype
+    if device.type == 'cuda':
+        dtype = torch.bfloat16
+    elif device.type == 'mps':
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    print(f"Using dtype: {dtype}")
+
+    # Load model and tokenizer from Hugging Face
+    print(f"Loading model and tokenizer from: {args.model_name}")
+    model = AutoModel.from_pretrained(
+        args.model_name,
+        dtype=dtype,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    ).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    print("Model and tokenizer loaded successfully.")
+
     # Setup dataset and dataloader
-    mllm_transform = build_transform(224)
-    dataset = TTALoRADataset(
-        dataset_folder=args.dataset_folder,
-        download_dataset=False,
-        target_model='MLLM',
-        transform=mllm_transform,
-        quick_validate=args.quick_validate
-    )
+    # We load PIL images directly now, so no transform is needed here.
+    # The transform will be applied inside `load_image` on the patches.
+    
+    # Metadata files are expected to be in a fixed location within the repo
+    metadata_source_path = "./data"
+    print(f"Loading metadata from default path: {metadata_source_path}")
+
+    if os.path.isdir(args.dataset_path):
+        print(f"Loading dataset from folder: {args.dataset_path}")
+        dataset = TTALoRADataset(
+            dataset_folder=args.dataset_path,
+            download_dataset=False,
+            target_model='MLLM',
+            transform=None, # No transform here, PIL images will be loaded
+            quick_validate=args.quick_validate
+        )
+    else:
+        print(f"Loading dataset from webdataset source: {args.dataset_path}")
+        dataset = WebTTALoRADataset(
+            url=args.dataset_path,
+            metadata_path=metadata_source_path,
+            transform=None, # No transform here
+            quick_validate=args.quick_validate
+        )
+        
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
-        worker_init_fn=worker_init_fn
+        shuffle=not isinstance(dataset, WebTTALoRADataset), # Disable shuffle for IterableDataset
+        collate_fn=safe_pil_collate,
+        worker_init_fn=worker_init_fn,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == 'cuda')
     )
 
-    # Load Model and Tokenizer
-    print(f"Loading model: {args.model_name}")
-    model = AutoModel.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True
-    ).eval().cuda()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True, use_fast=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
     # Load class and corruption indices
-    with open(dataset.class_index, 'r') as f:
+    class_index_path = os.path.join(metadata_source_path, 'imagenet_class_index.json')
+    corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+
+    with open(class_index_path, 'r') as f:
         class_index = json.load(f)
     class_names = [details[1] for details in class_index.values()]
 
-    with open(dataset.corruption_index, 'r') as f:
+    with open(corruption_index_path, 'r') as f:
         corruption_index = json.load(f)
     corruption_names = list(corruption_index.keys())
 
+    # Determine the number of samples to process
+    num_samples_to_collect = args.num_samples
+    if num_samples_to_collect is None:
+        try:
+            # For map-style datasets (folders), we can get the full length
+            num_samples_to_collect = len(dataset)
+            print(f"No --num_samples provided. Evaluating all {num_samples_to_collect} samples from the dataset.")
+        except TypeError:
+            # For iterable datasets (webdataset), length is unknown beforehand
+            print("No --num_samples provided. Evaluating all samples from the iterable dataset.")
+
     # Collect data
-    images, labels = collect_data(dataloader, args.num_samples)
+    images, labels = collect_data(dataloader, num_samples_to_collect)
     if images is None:
         print("Could not collect any data. Exiting.")
         return
 
-    print(f"\nCollected {images.shape[0]} images for evaluation.")
+    print(f"\nCollected {len(images)} images for evaluation.")
 
     # --- Task: Classification ---
+    results_dict = {}
+    prompts_used = {}
     if args.task in ['classification', 'all']:
+        # prompt_template = (
+        #     "<image>\n"
+        #     "Please select the most appropriate word from the following 1000 ImageNet categories that best describes the content of the image: [{class_list}]. "
+        #     "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
+        # )
         prompt_template = (
             "<image>\n"
-            "Please select the most appropriate word from the following 1000 ImageNet categories that best describes the content of the image: [{class_list}]. "
-            "Please provide only one word as your answer, ensure it is from the provided list, and do not add any explanation."
+            "As an expert image analyst, identify the primary category of the subject in the image.\n\n"
+            "Choose your answer from the following list: [{class_list}]\n\n"
+            "Your answer must be a single word from the list."
         )
-        predictions = batch_predict(model, tokenizer, images, class_names, prompt_template)
-        evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
+        prompts_used["classification_prompt"] = prompt_template
+        predictions = batch_predict(model, tokenizer, images, class_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
+        classification_accuracy = evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
+        results_dict["classification_accuracy"] = round(classification_accuracy, 2)
 
     # --- Task: Corruption Detection ---
     if args.task in ['corruption', 'all']:
+        # prompt_template = (
+        #     "<image>\n"
+        #     "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
+        #     "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
+        # )
         prompt_template = (
             "<image>\n"
-            "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
-            "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
+            "As an expert in digital image forensics, identify the type of corruption present in this image.\n\n"
+            "Choose your answer from the following list: [{class_list}]\n\n"
+            "Your answer must be a single word from the list."
         )
-        predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template)
-        evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
+        prompts_used["corruption_prompt"] = prompt_template
+        predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
+        corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
+        results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
+
+    # --- Save results ---
+    # Generate a descriptive log file name based on model and dataset
+    model_name_short = args.model_name.split('/')[-1]
+    
+    dataset_base = os.path.basename(args.dataset_path).lower()
+    if 'nano-imagenet-c' in dataset_base:
+        dataset_name_short = 'nano'
+    elif 'mini-imagenet-c' in dataset_base:
+        dataset_name_short = 'mini'
+    elif 'imagenet-c' in dataset_base:
+        dataset_name_short = 'full'
+    else:
+        dataset_name_short = dataset_base.replace('.tar', '')
+
+    log_filename = f"{model_name_short}_on_{dataset_name_short}_log.json"
+    log_path = os.path.join("./results", log_filename)
+
+    command = "python " + " ".join(sys.argv)
+    save_results_to_json(log_path, command, args, results_dict, prompts_used)
 
 
 if __name__ == "__main__":
     """
-    Example:
-    python run_evaluation.py 
-    Model: 
-    1. OpenGVLab/InternVL3_1B
-    2. OpenGVLab/InternVL3_5-1B
-    3. OpenGVLab/InternVL3_5-2B
-    4. HuggingFaceTB/SmolVLM-256M-Instruct
-    5. HuggingFaceTB/SmolVLM-500M-Instruct
+    Example Usage:
+    ------------------------------------------------------------------------------------
+    
+    1. Quick Sanity Check (evaluates a few samples from the nano dataset):
+       python run_evaluation.py --quick_validate
+    
+    2. Evaluate a specific model on the full local 'nano-imagenet-c' dataset:
+       python run_evaluation.py \
+           --dataset_path ./data/nano-imagenet-c \
+           --model_name HuggingFaceTB/SmolVLM-500M-Instruct
+
+    3. Evaluate the default model on the 'nano-imagenet-c' dataset from Hugging Face Hub:
+       python run_evaluation.py --dataset_path niuniandaji/nano-imagenet-c
+    
+    4. Evaluate only the 'classification' task and limit to 100 samples:
+       python run_evaluation.py \
+           --dataset_path ./data/nano-imagenet-c \
+           --task classification \
+           --num_samples 100
+    
+    ------------------------------------------------------------------------------------
+    
+    Notes:
+    - Results are automatically saved to a JSON file in the './results' directory.
+    - The log file is named based on the model and dataset used.
+    - Metadata files (e.g., class indices) are expected in the './data' directory.
+
+    Available Models & Datasets:
+    - Models: This script is compatible with various Vision-Language Models from Hugging Face.
+      Some tested models include:
+      - OpenGVLab/InternVL3-1B
+      - OpenGVLab/InternVL3_5-1B
+      - OpenGVLab/InternVL3_5-2B
+      - HuggingFaceTB/SmolVLM-256M-Instruct
+      - HuggingFaceTB/SmolVLM-500M-Instruct
+
+    - Datasets: The --dataset_path argument supports three formats:
+      1. Path to a local folder (e.g., ./data/mini-ImageNet-C)
+      2. Path to a local .tar webdataset file (e.g., ./data/nano-ImageNet-C.tar)
+      3. A Hugging Face Hub dataset ID (e.g., niuniandaji/nano-imagenet-c)
     """
+    
     parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models on ImageNet-C")
-    parser.add_argument("--dataset_folder", type=str, default="./data/mini-ImageNet-C", help="Path to the Mini-ImageNet-C dataset folder.")
-    parser.add_argument("--model_name", type=str, default="", help="Hugging Face model identifier.")
-    parser.add_argument("--num_samples", type=int, default=5000, help="Number of images to evaluate.")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for the DataLoader.")
+    parser.add_argument("--dataset_path", type=str, default="./data/nano-imagenet-c", help="Path to the dataset (folder, .tar file, or HF repo ID).")
+    parser.add_argument("--model_name", type=str, default="OpenGVLab/InternVL3-1B", help="Hugging Face model identifier.")
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of images to evaluate. If not provided, evaluates the entire dataset.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for the DataLoader.")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
     parser.add_argument("--task", type=str, default="all", choices=['classification', 'corruption', 'all'], help="Task to perform.")
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
+    parser.add_argument("--device", type=str, default=None, help="Device to use for computation (e.g., 'cpu', 'cuda'). Defaults to auto-detection.")
     
     args = parser.parse_args()
     main(args)
