@@ -9,6 +9,7 @@ import io
 from tqdm import tqdm
 import webdataset as wds
 from torch.utils.data import IterableDataset
+import numpy as np
 
 image_transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -20,9 +21,8 @@ def worker_init_fn(worker_id):
     """
     Sets the seed for each worker in a DataLoader.
     """
-    seed = 42 + worker_id
-    random.seed(seed)
-
+    seed = 7600
+    np.random.seed(seed)
 
 class WebTTALoRADataset(IterableDataset):
     """

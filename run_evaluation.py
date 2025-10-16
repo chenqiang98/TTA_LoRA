@@ -14,6 +14,7 @@ from tqdm import tqdm
 import os
 import sys
 import datetime
+import time
 
 from data.dataloader import TTALoRADataset, worker_init_fn, WebTTALoRADataset
 
@@ -119,12 +120,16 @@ def load_image(image_file, input_size=448, max_num=12):
     pixel_values = torch.stack(pixel_values)
     return pixel_values
 
-def create_prompt(class_names, prompt_template):
+def create_prompt(class_names, prompt_template, k_values=None):
     """Creates a prompt string from a list of class names."""
     class_list_str = ", ".join(class_names)
-    return prompt_template.format(class_list=class_list_str)
+    if k_values is not None:
+        prompt_template = prompt_template.format(k_values=k_values, class_list=class_list_str)
+    else:
+        prompt_template = prompt_template.format(class_list=class_list_str)
+    return prompt_template
 
-def batch_predict(model, tokenizer, all_images, class_names, prompt_template, device, batch_size=8, dtype=torch.bfloat16):
+def batch_predict(model, tokenizer, all_images, class_names, prompt_template, device, batch_size=8, dtype=torch.bfloat16, k_values=None):
     """
     Performs prediction on a set of images given a list of candidate classes.
     This function processes images in batches for efficiency.
@@ -136,10 +141,13 @@ def batch_predict(model, tokenizer, all_images, class_names, prompt_template, de
         pad_token_id=tokenizer.eos_token_id
     )
 
-    question = create_prompt(class_names, prompt_template)
+    question = create_prompt(class_names, prompt_template, k_values)
     
     print(f"Preparing {len(all_images)} images for prediction...")
     print(f"Choosing from {len(class_names)} candidate classes.")
+
+    # Start timing for prediction
+    start_time = time.time()
 
     with torch.no_grad():
         # Create batches
@@ -165,7 +173,12 @@ def batch_predict(model, tokenizer, all_images, class_names, prompt_template, de
                 except Exception as e:
                     print(f"Error predicting image {i+j+1}: {e}")
                     results.append(f"Prediction failed: {str(e)}")
-    return results
+    
+    # End timing for prediction
+    end_time = time.time()
+    prediction_time = end_time - start_time
+    
+    return results, prediction_time
 
 
 def collect_data(dataloader, num_samples):
@@ -252,7 +265,85 @@ def evaluate(predictions, true_labels, class_names_map, task_name, quick_validat
     print(f"\nOverall {task_name} Accuracy: {total_correct}/{len(predictions)} = {accuracy:.2f}%")
     return accuracy
 
-def save_results_to_json(log_path, command, args, results, prompts):
+
+def evaluate_top_k(predictions, true_labels, class_names_map, task_name, quick_validate=False, k_values=3):
+    """Evaluates top-k accuracy for comma-separated class name predictions."""
+    print(f"\n--- {task_name} Top-K Prediction Results ---")
+    print(f"Evaluating top-{k_values} corruption types.")
+    
+    # For classification, class_names_map is a list. For corruption, it's a dict.
+    if isinstance(class_names_map, dict):
+        idx_to_name = {v: k for k, v in class_names_map.items()}
+        num_classes = len(class_names_map)
+    else: # list
+        idx_to_name = class_names_map
+        num_classes = len(class_names_map)
+    
+    if k_values > num_classes:
+        print(f"Skipping k={k_values} as it exceeds number of classes ({num_classes})")
+        return {}
+    
+    accuracies = {}
+    
+    total_correct = 0
+    for i in range(len(predictions)):
+        true_idx = true_labels[i].item()
+        true_name = idx_to_name.get(true_idx, "Unknown") if isinstance(idx_to_name, dict) else idx_to_name[true_idx]
+        
+        raw_prediction = predictions[i]
+        
+        # Parse comma-separated class names and clean them
+        if isinstance(raw_prediction, str):
+            # Remove trailing periods and extra whitespace, then split by comma
+            cleaned_prediction = raw_prediction.rstrip('.').strip()
+            predicted_names = [name.strip().rstrip('.') for name in cleaned_prediction.split(',')]
+        else:
+            predicted_names = [str(raw_prediction).strip().rstrip('.')]
+        
+        # Convert predicted names to indices
+        predicted_indices = []
+        for name in predicted_names:
+            # Skip empty names
+            if not name:
+                continue
+                
+            # Find matching index for this name
+            for idx, class_name in idx_to_name.items():
+                if isinstance(idx_to_name, dict):
+                    if class_name.replace(" ", "").lower() == name.replace(" ", "").lower():
+                        predicted_indices.append(idx)
+                        break
+                else:
+                    if idx_to_name[idx].replace(" ", "").lower() == name.replace(" ", "").lower():
+                        predicted_indices.append(idx)
+                        break
+        
+        # Take top-k predictions
+        top_k_indices = predicted_indices[:k_values]
+        
+        # Check if true label is in top-k
+        if true_idx in top_k_indices:
+            total_correct += 1
+        
+        # Display sample results for first few images
+        if i < 10 and quick_validate:
+            top_k_names = []
+            for idx in top_k_indices:
+                name = idx_to_name.get(idx, "Unknown") if isinstance(idx_to_name, dict) else idx_to_name[idx]
+                top_k_names.append(name)
+            
+            print(f"\nImage {i+1}:")
+            print(f"  True Label: {true_name} (Index: {true_idx})")
+            print(f"  Top-{k_values} Predictions: {', '.join(top_k_names)}")
+            print(f"  Correct: {'Yes' if true_idx in top_k_indices else 'No'}")
+    
+    accuracy = (total_correct / len(predictions)) * 100 if len(predictions) > 0 else 0
+    accuracies[f"top_{k_values}"] = round(accuracy, 2)
+    print(f"\nTop-{k_values} Accuracy: {total_correct}/{len(predictions)} = {accuracy:.2f}%")
+    
+    return accuracies
+
+def save_results_to_json(log_path, command, args, results, prompts, prediction_times):
     """Saves the experiment parameters and results to a JSON file."""
     
     results_dir = os.path.dirname(log_path)
@@ -265,7 +356,8 @@ def save_results_to_json(log_path, command, args, results, prompts):
         "command": command,
         "parameters": vars(args),
         "results": results,
-        "prompts": prompts
+        "prompts": prompts,
+        "prediction_times (seconds)": prediction_times
     }
 
     log_data = []
@@ -394,6 +486,8 @@ def main(args):
     # --- Task: Classification ---
     results_dict = {}
     prompts_used = {}
+    prediction_times = {"classification_time": None, "corruption_time": None}
+    
     if args.task in ['classification', 'all']:
         # prompt_template = (
         #     "<image>\n"
@@ -407,9 +501,10 @@ def main(args):
             "Your answer must be a single word from the list."
         )
         prompts_used["classification_prompt"] = prompt_template
-        predictions = batch_predict(model, tokenizer, images, class_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
+        predictions, classification_time = batch_predict(model, tokenizer, images, class_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
         classification_accuracy = evaluate(predictions, labels[1], class_names, "Classification", args.quick_validate)
         results_dict["classification_accuracy"] = round(classification_accuracy, 2)
+        prediction_times["classification_time"] = round(classification_time, 2)
 
     # --- Task: Corruption Detection ---
     if args.task in ['corruption', 'all']:
@@ -418,16 +513,32 @@ def main(args):
         #     "Please select the corruption type that best describes the image from the following list: [{class_list}]. "
         #     "Please provide only the name of the corruption type, ensure it is from the provided list, and do not add any explanation."
         # )
-        prompt_template = (
-            "<image>\n"
-            "As an expert in digital image forensics, identify the type of corruption present in this image.\n\n"
-            "Choose your answer from the following list: [{class_list}]\n\n"
-            "Your answer must be a single word from the list."
-        )
-        prompts_used["corruption_prompt"] = prompt_template
-        predictions = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
-        corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
-        results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
+        if args.top_k_values:
+            prompt_template = (
+                "<image>\n"
+                "As an expert in digital image forensics, identify the type of corruption present in this image.\n\n"
+                "return top [{k_values}] corruption types in the image: [{class_list}]\n\n"
+                "Your answer must be [{k_values}] words from the list separated by commas."
+            )
+            prompts_used["corruption_prompt"] = prompt_template
+            predictions, corruption_time = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype, k_values=args.top_k_values)
+            # print(f"Predictions: {predictions}")
+            corruption_accuracies = evaluate_top_k(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate, args.top_k_values)
+            results_dict["corruption_type_accuracies"] = corruption_accuracies
+            prediction_times["corruption_time"] = round(corruption_time, 2)
+        else:
+            prompt_template = (
+                "<image>\n"
+                "As an expert in digital image forensics, identify the type of corruption present in this image.\n\n"
+                "Choose your answer from the following list: [{class_list}]\n\n"
+                "Your answer must be a single word from the list."
+            )
+            prompts_used["corruption_prompt"] = prompt_template
+            predictions, corruption_time = batch_predict(model, tokenizer, images, corruption_names, prompt_template, device, batch_size=args.batch_size, dtype=dtype)
+            corruption_accuracy = evaluate(predictions, labels[0], corruption_index, "Corruption Type", args.quick_validate)
+            results_dict["corruption_type_accuracy"] = round(corruption_accuracy, 2)
+            prediction_times["corruption_time"] = round(corruption_time, 2)
+
 
     # --- Save results ---
     # Generate a descriptive log file name based on model and dataset
@@ -447,7 +558,7 @@ def main(args):
     log_path = os.path.join("./results", log_filename)
 
     command = "python " + " ".join(sys.argv)
-    save_results_to_json(log_path, command, args, results_dict, prompts_used)
+    save_results_to_json(log_path, command, args, results_dict, prompts_used, prediction_times)
 
 
 if __name__ == "__main__":
@@ -504,6 +615,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7600, help="Random seed for reproducibility.")
     parser.add_argument("--quick_validate", action='store_true', help="Run in quick validation mode with a small subset of data.")
     parser.add_argument("--device", type=str, default=None, help="Device to use for computation (e.g., 'cpu', 'cuda'). Defaults to auto-detection.")
+    parser.add_argument("--top_k_values", type=int, default=None, help="Top-k values to evaluate. If not provided, evaluates only top-1 accuracy.")
     
     args = parser.parse_args()
     main(args)
