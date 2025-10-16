@@ -13,7 +13,7 @@ This repository contains a flexible script (`run_evaluation.py`) for evaluating 
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/chenqiang98/TTA_LoRA.git
+    git clone https://github.com/LIUUUUUZ/TTA_LoRA.git
     cd TTA_LoRA
     ```
 
