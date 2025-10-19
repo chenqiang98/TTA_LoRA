@@ -169,6 +169,101 @@ def train_lora_for_corruption(prediction_model, corruption_samples, transform, a
     return lora_modules
 
 
+def load_lora_modules(lora_load_dir, corruption_name, device):
+    """Load LoRA modules for a specific corruption type"""
+    corruption_save_path = os.path.join(lora_load_dir, f"{corruption_name}_lora.pth")
+    if not os.path.exists(corruption_save_path):
+        raise FileNotFoundError(f"LoRA module not found: {corruption_save_path}")
+    
+    checkpoint = torch.load(corruption_save_path, map_location=device)
+    lora_rank = checkpoint['lora_rank']
+    lora_state_dicts = checkpoint['lora_modules']
+    
+    return lora_state_dicts, lora_rank
+
+
+def merge_lora_modules(lora_modules_list, target_modules, lora_rank, device):
+    """Merge multiple LoRA modules by averaging their parameters"""
+    if len(lora_modules_list) == 0:
+        return None
+    
+    # Initialize merged LoRA modules
+    merged_lora_modules = {}
+    
+    for name, module in target_modules.items():
+        in_features = module.in_features
+        out_features = module.out_features
+        merged_lora = LoRALayer(in_features, out_features, rank=lora_rank).to(device)
+        
+        # Average the parameters from all LoRA modules
+        lora_A_sum = torch.zeros_like(merged_lora.lora_A)
+        lora_B_sum = torch.zeros_like(merged_lora.lora_B)
+        
+        for lora_state_dict in lora_modules_list:
+            if name in lora_state_dict:
+                lora_A_sum += lora_state_dict[name]['lora_A']
+                lora_B_sum += lora_state_dict[name]['lora_B']
+        
+        merged_lora.lora_A.data = lora_A_sum / len(lora_modules_list)
+        merged_lora.lora_B.data = lora_B_sum / len(lora_modules_list)
+        
+        merged_lora_modules[name] = merged_lora
+    
+    return merged_lora_modules
+
+
+def evaluate_with_lora(prediction_model, eval_samples, transform, lora_modules, target_modules, device):
+    """Evaluate the model with LoRA modules applied"""
+    # Create dataset and dataloader
+    eval_dataset = CorruptionDataset(eval_samples, transform)
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=4
+    )
+    
+    prediction_model.eval()
+    for lora_module in lora_modules.values():
+        lora_module.eval()
+    
+    # Register forward hooks to apply LoRA
+    hooks = []
+    
+    def create_lora_hook(module_name, lora_module):
+        def hook(module, input, output):
+            input_tensor = input[0]
+            lora_delta = lora_module(input_tensor)
+            return output + lora_delta
+        return hook
+    
+    for name, module in target_modules.items():
+        if name in lora_modules:
+            hook = module.register_forward_hook(create_lora_hook(name, lora_modules[name]))
+            hooks.append(hook)
+    
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for images, labels in tqdm(eval_loader, desc="Evaluating"):
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            outputs = prediction_model(images)
+            _, predicted = torch.max(outputs, 1)
+            
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    accuracy = 100 * correct / total
+    return accuracy
+
+
 def main(args):
     # Set device
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -216,9 +311,11 @@ def main(args):
     if args.prediction_model_name == 'resnet50':
         prediction_model = resnet50(pretrained=True)
         prediction_transform = get_resnet_train_transform()
+        eval_transform = get_resnet_eval_transform()
     elif args.prediction_model_name == 'vit_base':
         prediction_model = vit_base_patch16_224(pretrained=True)
         prediction_transform = get_vit_train_transform()
+        eval_transform = get_vit_eval_transform()
     else:
         raise ValueError(f"Invalid prediction model name: {args.prediction_model_name}")
     
@@ -263,6 +360,119 @@ def main(args):
       print(f"\n{'='*80}")
       print(f"All LoRA modules saved to: {lora_save_dir}")
       print(f"{'='*80}")
+    
+    elif args.task == 'eval':
+        if args.lora_load_dir is None:
+            raise ValueError("Please provide --lora_load_dir for evaluation")
+        
+        print(f"\n{'='*80}")
+        print(f"Starting Evaluation")
+        print(f"{'='*80}")
+        
+        # Get target modules for the prediction model
+        target_modules = get_target_modules(prediction_model, args.prediction_model_name)
+        
+        # Collect all samples for evaluation (subset based on num_samples)
+        all_eval_samples = []
+        for batch_images, batch_labels in tqdm(test_loader, desc="Collecting evaluation samples"):
+            for image, label in zip(batch_images, batch_labels):
+                all_eval_samples.append((image, label))
+                if args.num_samples and len(all_eval_samples) >= args.num_samples:
+                    break
+            if args.num_samples and len(all_eval_samples) >= args.num_samples:
+                break
+        
+        print(f"Total evaluation samples: {len(all_eval_samples)}")
+        
+        # Cache for merged LoRA modules: frozenset(corruption_names) -> merged_lora_modules
+        lora_cache = {}
+        
+        correct = 0
+        total = 0
+        
+        for image, label in tqdm(all_eval_samples, desc="Evaluating samples"):
+            corruption_id, cls, severity, topk_corruptions = label
+            
+            # Get top-k corruptions for this sample
+            k = min(args.eval_top_k_corruptions, len(topk_corruptions))
+            selected_corruptions = topk_corruptions[:k]
+            
+            # Create a hashable key for the cache
+            corruption_set_key = frozenset(selected_corruptions)
+            
+            # Check if we have already merged these LoRA modules
+            if corruption_set_key not in lora_cache:
+                # Load and merge LoRA modules for the selected corruptions
+                lora_modules_list = []
+                lora_rank = None
+                
+                for corruption_name in selected_corruptions:
+                    try:
+                        lora_state_dict, rank = load_lora_modules(args.lora_load_dir, corruption_name, device)
+                        lora_modules_list.append(lora_state_dict)
+                        if lora_rank is None:
+                            lora_rank = rank
+                    except FileNotFoundError as e:
+                        print(f"Warning: {e}")
+                        continue
+                
+                if len(lora_modules_list) == 0:
+                    print(f"Warning: No LoRA modules found for corruptions {selected_corruptions}")
+                    continue
+                
+                # Merge the LoRA modules
+                merged_lora_modules = merge_lora_modules(lora_modules_list, target_modules, lora_rank, device)
+                lora_cache[corruption_set_key] = merged_lora_modules
+            else:
+                merged_lora_modules = lora_cache[corruption_set_key]
+            
+            # Evaluate this single sample with the merged LoRA
+            single_sample = [(image, label)]
+            sample_dataset = CorruptionDataset(single_sample, eval_transform)
+            sample_loader = DataLoader(sample_dataset, batch_size=1, shuffle=False)
+            
+            # Register hooks
+            hooks = []
+            
+            def create_lora_hook(module_name, lora_module):
+                def hook(module, input, output):
+                    input_tensor = input[0]
+                    lora_delta = lora_module(input_tensor)
+                    return output + lora_delta
+                return hook
+            
+            for name, module in target_modules.items():
+                if name in merged_lora_modules:
+                    hook = module.register_forward_hook(create_lora_hook(name, merged_lora_modules[name]))
+                    hooks.append(hook)
+            
+            prediction_model.eval()
+            for lora_module in merged_lora_modules.values():
+                lora_module.eval()
+            
+            with torch.no_grad():
+                for images, labels in sample_loader:
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    
+                    outputs = prediction_model(images)
+                    _, predicted = torch.max(outputs, 1)
+                    
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+            
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+        
+        accuracy = 100 * correct / total
+        print(f"\n{'='*80}")
+        print(f"Evaluation Results:")
+        print(f"Total samples: {total}")
+        print(f"Correct predictions: {correct}")
+        print(f"Accuracy: {accuracy:.2f}%")
+        print(f"Number of cached merged LoRA modules: {len(lora_cache)}")
+        print(f"{'='*80}")
 
       
 
@@ -328,6 +538,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_rank", type=int, default=5, help="Rank of the LoRA model.")
     parser.add_argument("--lora_save_dir", type=str, default="LoRA", help="Directory to save the LoRA modules.")
     parser.add_argument("--lora_load_dir", type=str, default=None, help="Directory to load the LoRA modules.")
+    parser.add_argument("--eval_top_k_corruptions", type=int, default=1, help="Each image loads its Top-k corruptions loras to evaluate. If not provided, evaluates only top-1 accuracy.")
     
     args = parser.parse_args()
     main(args)
