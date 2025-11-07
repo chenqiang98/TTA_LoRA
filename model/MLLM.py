@@ -425,15 +425,31 @@ def MLLM(args) -> torch.utils.data.Dataset:
 
     # Load class and corruption indices
     class_index_path = os.path.join(metadata_source_path, 'imagenet_class_index.json')
-    corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+    
+    # Use custom corruption_index_path if provided in args, otherwise use default
+    if hasattr(args, 'corruption_index_path') and args.corruption_index_path is not None:
+        corruption_index_path = args.corruption_index_path
+        print(f"MLLM: Using custom corruption_index_path: {corruption_index_path}")
+    else:
+        corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+        print(f"MLLM: Using default corruption_index_path: {corruption_index_path}")
 
     with open(class_index_path, 'r') as f:
         class_index = json.load(f)
     class_names = [details[1] for details in class_index.values()]
 
     with open(corruption_index_path, 'r') as f:
-        corruption_index = json.load(f)
+        corruption_index_raw = json.load(f)
+    
+    # Extract mapping if exists and remove it from corruption_index
+    if "_mapping" in corruption_index_raw:
+        corruption_index = {k: v for k, v in corruption_index_raw.items() if k != "_mapping"}
+        print(f"MLLM: Found mapping configuration, using {len(corruption_index)} grouped types for prediction")
+    else:
+        corruption_index = corruption_index_raw
+    
     corruption_names = list(corruption_index.keys())
+    print(f"MLLM: Loaded {len(corruption_names)} corruption types: {corruption_names}")
 
     # Determine the number of samples to process
     num_samples_to_collect = args.num_samples

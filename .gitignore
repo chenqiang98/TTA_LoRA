@@ -212,3 +212,8 @@ LoRA/
 
 #results
 results/
+
+data/nano-imagenet-c/
+.cursor/
+TTA_MS/
+.DS_Store

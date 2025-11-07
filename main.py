@@ -274,12 +274,39 @@ def main(args):
     # load corruption and class index
     metadata_source_path = "data"
     class_index_path = os.path.join(metadata_source_path, 'imagenet_class_index.json')
-    corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+    
+    # Use custom corruption_index_path if provided, otherwise use default
+    if args.corruption_index_path is not None:
+        corruption_index_path = args.corruption_index_path
+        print(f"Using custom corruption_index_path: {corruption_index_path}")
+    else:
+        corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+        print(f"Using default corruption_index_path: {corruption_index_path}")
     
     # Load corruption index to get the mapping
     import json
     with open(corruption_index_path, 'r') as f:
         corruption_index = json.load(f)
+    
+    # Extract mapping if exists (for grouped corruption types)
+    corruption_mapping = None
+    if "_mapping" in corruption_index:
+        corruption_mapping = corruption_index["_mapping"]
+        # Remove _mapping from corruption_index to get only category names
+        corruption_index = {k: v for k, v in corruption_index.items() if k != "_mapping"}
+        print(f"Found mapping configuration: {len(corruption_mapping)} original types -> {len(corruption_index)} groups")
+        print(f"Mapping: {corruption_mapping}")
+    
+    # Load original corruption index for ground truth mapping (if mapping exists)
+    original_corruption_index = None
+    if corruption_mapping is not None:
+        original_corruption_index_path = os.path.join(metadata_source_path, 'corruption_index.json')
+        with open(original_corruption_index_path, 'r') as f:
+            original_corruption_index = json.load(f)
+        print(f"Loaded original corruption index: {len(original_corruption_index)} types")
+    
+    # Store corruption_index_path in args for MLLM function
+    args.corruption_index_path = corruption_index_path
     
     # get processed dataset(with Topk corruption as labels) 
     dataset = MLLM(args)
@@ -295,14 +322,38 @@ def main(args):
     corruption_datasets = {}
     for corruption_name in corruption_index.keys():
         corruption_datasets[corruption_name] = []
-    # Iterate through all data and cluster by top1 corruption
+    
+    # Iterate through all data and cluster by corruption type
     for batch_images, batch_labels in tqdm(test_loader, desc="Clustering by corruption"):
         for i, (image, label) in enumerate(zip(batch_images, batch_labels)):
             corruption_id, cls, severity, topk_corruptions = label
-            # Get the top1 corruption name (first in the topk list)
-            top1_corruption = topk_corruptions[0]
+            
+            # Determine the corruption group to use
+            if corruption_mapping is not None and original_corruption_index is not None:
+                # Use ground truth mapping: map original corruption type to grouped type
+                original_corruption_names = list(original_corruption_index.keys())
+                if corruption_id < len(original_corruption_names):
+                    original_corruption_name = original_corruption_names[corruption_id]
+                    # Map original type to grouped type
+                    mapped_group = corruption_mapping.get(original_corruption_name)
+                    if mapped_group and mapped_group in corruption_datasets:
+                        top1_corruption = mapped_group
+                    else:
+                        # Fallback: use MLLM prediction if mapping fails
+                        top1_corruption = topk_corruptions[0] if topk_corruptions else list(corruption_index.keys())[0]
+                        print(f"Warning: Could not map {original_corruption_name}, using MLLM prediction: {top1_corruption}")
+                else:
+                    # Fallback: use MLLM prediction
+                    top1_corruption = topk_corruptions[0] if topk_corruptions else list(corruption_index.keys())[0]
+            else:
+                # No mapping: use MLLM prediction directly (original 15 types or exact match)
+                top1_corruption = topk_corruptions[0] if topk_corruptions else list(corruption_index.keys())[0]
+            
             # Add the sample to the corresponding corruption dataset
-            corruption_datasets[top1_corruption].append((image, label))
+            if top1_corruption in corruption_datasets:
+                corruption_datasets[top1_corruption].append((image, label))
+            else:
+                print(f"Warning: {top1_corruption} not found in corruption_datasets, skipping sample")
 
     # Print statistics
     print("Dataset clustering by top1 corruption:")
@@ -580,6 +631,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_save_dir", type=str, default="LoRA", help="Directory to save the LoRA modules.")
     parser.add_argument("--lora_load_dir", type=str, default=None, help="Directory to load the LoRA modules.")
     parser.add_argument("--eval_top_k_corruptions", type=int, default=1, help="Each image loads its Top-k corruptions loras to evaluate. If not provided, evaluates only top-1 accuracy.")
+    parser.add_argument("--corruption_index_path", type=str, default=None, help="Path to corruption_index.json file. If not provided, uses default path: data/corruption_index.json")
     
     args = parser.parse_args()
     main(args)
