@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from datetime import datetime
+import json
+import sys
 
 
 from model.MLLM import MLLM
@@ -473,6 +475,45 @@ def main(args):
         print(f"Accuracy: {accuracy:.2f}%")
         print(f"Number of cached merged LoRA modules: {len(lora_cache)}")
         print(f"{'='*80}")
+        
+        # Save evaluation results to JSON
+        results_dir = "./results"
+        os.makedirs(results_dir, exist_ok=True)
+        
+        model_name_short = args.model_name.split('/')[-1]
+        prediction_model_short = args.prediction_model_name
+        lora_dir_short = os.path.basename(args.lora_load_dir)
+        
+        log_filename = f"LoRA_eval_{prediction_model_short}_{lora_dir_short}_{model_name_short}_log.json"
+        log_path = os.path.join(results_dir, log_filename)
+        
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "command": "python " + " ".join(sys.argv),
+            "parameters": vars(args),
+            "results": {
+                "total_samples": total,
+                "correct_predictions": correct,
+                "accuracy": round(accuracy, 2),
+                "cached_lora_modules": len(lora_cache),
+                "eval_top_k_corruptions": args.eval_top_k_corruptions
+            }
+        }
+        
+        log_data = []
+        if os.path.exists(log_path):
+            with open(log_path, 'r') as f:
+                try:
+                    log_data = json.load(f)
+                except json.JSONDecodeError:
+                    log_data = []
+        
+        log_data.append(log_entry)
+        
+        with open(log_path, 'w') as f:
+            json.dump(log_data, f, indent=4)
+        
+        print(f"Results saved to {log_path}")
 
       
 
