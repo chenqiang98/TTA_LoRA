@@ -1,0 +1,30 @@
+{
+  "gaussian_noise": 0,
+  "shot_noise": 1,
+  "impulse_noise": 2,
+  "defocus_blur": 3,
+  "glass_blur": 4,
+  "motion_blur": 5,
+  "zoom_blur": 6,
+  "fog": 7,
+  "frost": 8,
+  "snow": 9,
+  "_mapping": {
+    "gaussian_noise": "gaussian_noise",
+    "shot_noise": "shot_noise",
+    "impulse_noise": "impulse_noise",
+    "defocus_blur": "defocus_blur",
+    "glass_blur": "glass_blur",
+    "motion_blur": "motion_blur",
+    "zoom_blur": "zoom_blur",
+    "fog": "fog",
+    "frost": "frost",
+    "snow": "snow",
+    "jpeg_compression": "gaussian_noise",
+    "pixelate": "gaussian_noise",
+    "brightness": "gaussian_noise",
+    "contrast": "gaussian_noise",
+    "elastic_transform": "defocus_blur"
+  }
+}
+
