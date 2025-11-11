@@ -1,0 +1,33 @@
+{
+  "brightness": 0,
+  "contrast": 1,
+  "defocus_blur": 2,
+  "elastic_transform": 3,
+  "frost": 4,
+  "gaussian_noise": 5,
+  "glass_blur": 6,
+  "impulse_noise": 7,
+  "shot_noise": 8,
+  "snow": 9,
+  "zoom_blur": 10,
+  "compression_artifacts": 11,
+  "motion_blur_fog": 12,
+  "_mapping": {
+    "brightness": "brightness",
+    "contrast": "contrast",
+    "defocus_blur": "defocus_blur",
+    "elastic_transform": "elastic_transform",
+    "fog": "motion_blur_fog",
+    "frost": "frost",
+    "gaussian_noise": "gaussian_noise",
+    "glass_blur": "glass_blur",
+    "impulse_noise": "impulse_noise",
+    "jpeg_compression": "compression_artifacts",
+    "motion_blur": "motion_blur_fog",
+    "pixelate": "compression_artifacts",
+    "shot_noise": "shot_noise",
+    "snow": "snow",
+    "zoom_blur": "zoom_blur"
+  }
+}
+

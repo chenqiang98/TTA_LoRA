@@ -33,7 +33,7 @@ class WebTTALoRADataset(IterableDataset):
         """
         Args:
             url (string): URL or path to the webdataset .tar file(s).
-            metadata_path (string): Path to the directory containing class_index.json and corruption_index.json.
+            metadata_path (string): Path to the directory containing imagenet_class_index.json and corruption_index.json.
             transform (callable, optional): Optional transform to be applied on a sample.
         """
         super().__init__()
@@ -42,8 +42,20 @@ class WebTTALoRADataset(IterableDataset):
         self.quick_validate = quick_validate
 
         # Load metadata
-        self.class_index_path = os.path.join(metadata_path, 'class_index.json')
+        self.class_index_path = os.path.join(metadata_path, 'imagenet_class_index.json')
         self.corruption_index_path = os.path.join(metadata_path, 'corruption_index.json')
+        
+        # Check if files exist and provide helpful error messages
+        if not os.path.exists(self.class_index_path):
+            raise FileNotFoundError(
+                f"Class index file not found: {self.class_index_path}\n"
+                f"Please ensure 'imagenet_class_index.json' exists in the metadata directory: {metadata_path}"
+            )
+        if not os.path.exists(self.corruption_index_path):
+            raise FileNotFoundError(
+                f"Corruption index file not found: {self.corruption_index_path}\n"
+                f"Please ensure 'corruption_index.json' exists in the metadata directory: {metadata_path}"
+            )
         
         with open(self.class_index_path, 'r') as f:
             self.class_index = json.load(f)
